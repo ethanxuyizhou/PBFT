@@ -1,0 +1,5 @@
+(executable
+ (name client)
+ (libraries core async rpcs websocket-async)
+ (preprocess (pps ppx_jane))
+)
