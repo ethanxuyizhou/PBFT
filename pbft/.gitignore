@@ -1,4 +1,4 @@
-pbft/src/app/.merlin
-pbft/src/client/.merlin
-pbft/src/server/.merlin
-pbft/src/rpcs/.merlin
+/pbft/src/app/.merlin
+/pbft/src/client/.merlin
+/pbft/src/server/.merlin
+/pbft/src/rpcs/.merlin
