@@ -1,6 +1,5 @@
 open Core_kernel
 open Async_rpc_kernel
-open Interface
 
 module Request = struct
   type t = {

@@ -45,7 +45,7 @@ B /Users/ethan/.opam/default/lib/time_now
 B /Users/ethan/.opam/default/lib/typerep
 B /Users/ethan/.opam/default/lib/uri
 B /Users/ethan/.opam/default/lib/variantslib
-B ../../../_build/default/pbft/src/rpcs/.rpcs.objs/byte
+B ../../../../_build/default/PBFT/pbft/src/rpcs/.rpcs.objs/byte
 S /Users/ethan/.opam/default/lib/async_kernel
 S /Users/ethan/.opam/default/lib/async_kernel/persistent_connection_kernel
 S /Users/ethan/.opam/default/lib/async_rpc_kernel

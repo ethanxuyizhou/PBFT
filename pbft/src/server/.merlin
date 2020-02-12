@@ -58,8 +58,8 @@ B /Users/ethan/.opam/default/lib/time_now
 B /Users/ethan/.opam/default/lib/typerep
 B /Users/ethan/.opam/default/lib/uri
 B /Users/ethan/.opam/default/lib/variantslib
-B ../../../_build/default/pbft/src/rpcs/.rpcs.objs/byte
-B ../../../_build/default/pbft/src/server/.server.eobjs/byte
+B ../../../../_build/default/PBFT/pbft/src/rpcs/.rpcs.objs/byte
+B ../../../../_build/default/PBFT/pbft/src/server/.server.eobjs/byte
 S /Users/ethan/.opam/default/lib/async
 S /Users/ethan/.opam/default/lib/async_extra
 S /Users/ethan/.opam/default/lib/async_kernel

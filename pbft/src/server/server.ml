@@ -28,13 +28,19 @@ let prepare_implementation =
   Rpc.One_way.implement Server_prepare_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (Prepare query)))
 
-let commit_implemntation =
+let commit_implementation =
   Rpc.One_way.implement Server_commit_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (Commit query)))
 
 let implementations =
   let implementations =
-    [ client_request_implementation; client_response_implementation ]
+    [
+      client_request_implementation;
+      client_response_implementation;
+      preprepare_implementation;
+      prepare_implementation;
+      commit_implementation;
+    ]
   in
   Rpc.Implementations.create_exn ~implementations
     ~on_unknown_rpc:`Close_connection
@@ -42,32 +48,47 @@ let implementations =
 (* Read what client has requested and forwards the message back to client *)
 let main_loop ~me ~host_and_ports () =
   let sequence_num = ref 0 in
-  let where_to_connects = List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port in
+  let where_to_connects =
+    List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
+  in
   Pipe.iter request_reader ~f:(fun query ->
       match query with
-      | Client query -> (
-          (sequence_num := !sequence_num + 1);
+      | Client query ->
+          sequence_num := !sequence_num + 1;
           let request =
-            Server_preprepare_rpcs.Request.{view = 0; operation = (Client_to_Server_rpcs.Request.operation query); sequence_number = !sequence_num}
+            Server_preprepare_rpcs.Request.
+              { view = 0; message = query; sequence_number = !sequence_num }
           in
           Deferred.List.iter where_to_connects ~f:(fun where_to_connect ->
               let%bind connection = Rpc.Connection.client where_to_connect in
               match connection with
-              | Ok connection -> Rpc.One_way.dispatch Server_preprepare_rpcs.rpc connection request
-              | Error _ -> Deferred.unit
-              )
-        )
-      | Preprepare query -> ()
-      | Prepare query -> ()
-      | Commit Server_commit_rpcs.Request.{replica_number; view; message; sequence_number} ->
-        let Client_to_server_rpcs.Request.{operation; timestamp; name_of_client} = message in
-        data := Interface.Operation.apply !data operation;
-        let response = Client_to_server_rpcs.Response.{result = !data; view; timestamp; replica_number = me} in
-        match Client_connection_manager.write_to_client ~name_of_client response with
-        | Error _ -> Deferred.unit
-        | Ok _ -> Deferred.unit)
-
-)
+              | Ok connection ->
+                  let _ =
+                    Rpc.One_way.dispatch Server_preprepare_rpcs.rpc connection
+                      request
+                  in
+                  Deferred.unit
+              | Error _ -> Deferred.unit)
+      | Preprepare _ -> Deferred.unit
+      | Prepare _ -> Deferred.unit
+      | Commit
+          Server_commit_rpcs.Request.
+            { replica_number; view; message; sequence_number } -> (
+          ignore (replica_number, sequence_number);
+          let Client_to_server_rpcs.Request.
+                { operation; timestamp; name_of_client } =
+            message
+          in
+          data := Interface.Operation.apply !data operation;
+          let response =
+            Client_to_server_rpcs.Response.create ~result:!data ~view ~timestamp
+              ~replica_number:me
+          in
+          match
+            Client_connection_manager.write_to_client ~name_of_client response
+          with
+          | Error _ -> Deferred.unit
+          | Ok _ -> Deferred.unit ))
 
 let command =
   Command.async ~summary:"Server"

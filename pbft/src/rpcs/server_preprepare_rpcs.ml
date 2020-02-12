@@ -1,6 +1,5 @@
 open Core_kernel
 open Async_rpc_kernel
-open Interface
 
 module Request = struct
   (* Optimization: send a digest instead of the entire operation *)

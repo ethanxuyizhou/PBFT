@@ -23,6 +23,9 @@ module Response = struct
     replica_number : int;
   }
   [@@deriving bin_io, fields, compare]
+
+  let create ~result ~view ~timestamp ~replica_number =
+    { result; view; timestamp; replica_number }
 end
 
 let request_rpc =
