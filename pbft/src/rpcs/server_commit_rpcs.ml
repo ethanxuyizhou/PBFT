@@ -9,6 +9,9 @@ module Request = struct
     sequence_number : int;
   }
   [@@deriving bin_io]
+
+  let create ~replica_number ~view ~message ~sequence_number =
+    { replica_number; view; message; sequence_number }
 end
 
 let rpc =

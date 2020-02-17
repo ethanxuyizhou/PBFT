@@ -8,6 +8,7 @@ let () =
   Async_js.init ();
   don't_wait_for
     (let%bind connection =
+       printf "Establishing connection\n";
        Rpc.Connection.client_exn ~uri:(Uri.of_string "ws://localhost") ()
      in
      let%map r, _ =

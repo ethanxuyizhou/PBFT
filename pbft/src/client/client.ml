@@ -23,14 +23,14 @@ let implementations =
 
 let send_update ~addresses query =
   let send_update_to_address address =
-    match%map Rpc.Connection.client address with
-    | Error _ -> ()
+    match%bind Rpc.Connection.client address with
+    | Error _ -> Deferred.unit
     | Ok connection ->
         let (_ : unit Or_error.t) =
           Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc connection
             query
         in
-        ()
+        Rpc.Connection.close connection
   in
   let key =
     Record_manager.Key.create (Client_to_server_rpcs.Request.timestamp query)
@@ -39,39 +39,7 @@ let send_update ~addresses query =
   | false -> Deferred.List.iter addresses ~f:send_update_to_address
   | true -> Deferred.unit
 
-let main_loop f addresses name =
-  let rec loop address w =
-    match%bind Rpc.Connection.client address with
-    | Error _ ->
-        let%bind () = after Time.Span.second in
-        loop address w
-    | Ok connection -> (
-        match%bind
-          Rpc.Pipe_rpc.dispatch Client_to_server_rpcs.response_rpc connection
-            Client_to_server_rpcs.Hello.{ name_of_client = name }
-        with
-        | Error _ ->
-            let%bind () = after Time.Span.second in
-            loop address w
-        | Ok r -> (
-            match r with
-            | Error _ -> Deferred.unit
-            | Ok (r, _) ->
-                let%bind () = Pipe.transfer r w ~f:Fn.id in
-                loop address w ) )
-  in
-  let pipe =
-    List.map addresses ~f:(fun address ->
-        let r, w = Pipe.create () in
-        don't_wait_for (loop address w);
-        r)
-    |> Pipe.interleave
-  in
-  let%bind () = after Time.Span.second in
-  Pipe.iter pipe ~f:(fun response ->
-      let open Client_to_server_rpcs in
-      let timestamp = Response.timestamp response in
-      let replica_number = Response.replica_number response in
+ = Response.replica_number response in
       let data = Response.result response in
       let key = Record_manager.Key.create timestamp in
       let%bind () = Record_manager.update key ~data ~replica_number in
@@ -106,6 +74,7 @@ let command =
       let%bind _ =
         Tcp.Server.create ~on_handler_error:`Ignore
           (Tcp.Where_to_listen.of_port 80) (fun _ reader writer ->
+            printf "connected\n";
             let app_to_ws, ws_write = Pipe.create () in
             let ws_read, ws_to_app = Pipe.create () in
             don't_wait_for

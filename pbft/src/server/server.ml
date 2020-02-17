@@ -32,6 +32,16 @@ let commit_implementation =
   Rpc.One_way.implement Server_commit_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (Commit query)))
 
+(*
+let view_change_implementation =
+  Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
+      don't_wait_for (Pipe.write request_writer (View_change query)))
+
+let new_view_implementation =
+  Rpc.One_way.implement Server_new_view_rpcs.rpc (fun _state query ->
+      don't_wait_for (Pipe.write request_writer (New_view query)))
+*)
+
 let implementations =
   let implementations =
     [
@@ -46,31 +56,76 @@ let implementations =
     ~on_unknown_rpc:`Close_connection
 
 (* Read what client has requested and forwards the message back to client *)
-let main_loop ~me ~host_and_ports () =
+let main ~me ~host_and_ports () =
   let sequence_num = ref 0 in
+  let current_view = ref 0 in
+  let n = List.length host_and_ports in
   let where_to_connects =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
+  let rec loop where_to_connect r =
+    match%bind Rpc.Connection.client where_to_connect with
+    | Error _ -> loop where_to_connect r
+    | Ok connection ->
+        let rec sub_loop () =
+          match%bind Pipe.read r with
+          | `Eof -> Deferred.unit
+          | `Ok query -> (
+              match query connection with
+              | Error _ -> loop where_to_connect r
+              | Ok _ -> sub_loop () )
+        in
+        sub_loop ()
+  in
+  let writes =
+    let rws =
+      List.map where_to_connects ~f:(fun where_to_connect ->
+          let r, w = Pipe.create () in
+          (where_to_connect, r, w))
+    in
+    List.iter rws ~f:(fun (where_to_connect, r, _) ->
+        don't_wait_for (loop where_to_connect r));
+    List.map rws ~f:(fun (_, _, w) -> w)
+  in
+  let is_leader view = view % n = me in
   Pipe.iter request_reader ~f:(fun query ->
       match query with
       | Client query ->
-          sequence_num := !sequence_num + 1;
-          let request =
-            Server_preprepare_rpcs.Request.
-              { view = 0; message = query; sequence_number = !sequence_num }
-          in
-          Deferred.List.iter where_to_connects ~f:(fun where_to_connect ->
-              let%bind connection = Rpc.Connection.client where_to_connect in
-              match connection with
-              | Ok connection ->
-                  let _ =
+          if is_leader !current_view then (
+            sequence_num := !sequence_num + 1;
+            let request =
+              Server_preprepare_rpcs.Request.
+                {
+                  view = !current_view;
+                  message = query;
+                  sequence_number = !sequence_num;
+                }
+            in
+            List.iter writes ~f:(fun w ->
+                Pipe.write_without_pushback w (fun connection ->
                     Rpc.One_way.dispatch Server_preprepare_rpcs.rpc connection
-                      request
-                  in
-                  Deferred.unit
-              | Error _ -> Deferred.unit)
-      | Preprepare _ -> Deferred.unit
-      | Prepare _ -> Deferred.unit
+                      request));
+            Deferred.unit )
+          else Deferred.unit
+      | Preprepare { view; message; sequence_number } ->
+          let request =
+            Server_prepare_rpcs.Request.create ~replica_number:me ~view ~message
+              ~sequence_number
+          in
+          List.iter writes ~f:(fun w ->
+              Pipe.write_without_pushback w (fun connection ->
+                  Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
+                    request));
+          Deferred.unit
+      | Prepare { replica_number; view; message; sequence_number } ->
+          let request =
+            Server_commit_rpcs.Request.create ~replica_number ~view ~message
+              ~sequence_number
+          in
+          List.iter writes ~f:(fun w ->
+              Pipe.write_without_pushback w (fun connection ->
+                  Rpc.One_way.dispatch Server_commit_rpcs.rpc connection request));
+          Deferred.unit
       | Commit
           Server_commit_rpcs.Request.
             { replica_number; view; message; sequence_number } -> (
@@ -94,8 +149,8 @@ let command =
   Command.async ~summary:"Server"
     (let open Command.Let_syntax in
     let%map_open host_and_ports =
-      flag "-host-and-ports" (listed host_and_port)
-        ~doc:"PORTS ports of all servers"
+      flag "-host-and-port" (listed host_and_port)
+        ~doc:"HOST_AND_PORTS ports of all servers"
     and me =
       flag "-me" (required int)
         ~doc:
@@ -112,7 +167,7 @@ let command =
             Rpc.Connection.server_with_close r w ~implementations
               ~on_handshake_error:`Ignore ~connection_state:Fn.id)
       in
-      don't_wait_for (main_loop ~me ~host_and_ports ());
+      don't_wait_for (main ~me ~host_and_ports ());
       Deferred.never ())
 
 let () = Command.run command
