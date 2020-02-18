@@ -60,6 +60,7 @@ let main ~me ~host_and_ports () =
   let sequence_num = ref 0 in
   let current_view = ref 0 in
   let n = List.length host_and_ports in
+  let f = (n - 1) / 3 in
   let where_to_connects =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
@@ -72,7 +73,9 @@ let main ~me ~host_and_ports () =
           | `Eof -> Deferred.unit
           | `Ok query -> (
               match query connection with
-              | Error _ -> loop where_to_connect r
+              | Error _ ->
+                  let%bind () = Rpc.Connection.close connection in
+                  loop where_to_connect r
               | Ok _ -> sub_loop () )
         in
         sub_loop ()
@@ -88,6 +91,7 @@ let main ~me ~host_and_ports () =
     List.map rws ~f:(fun (_, _, w) -> w)
   in
   let is_leader view = view % n = me in
+  let commit_log = ref Int.Map.empty in
   Pipe.iter request_reader ~f:(fun query ->
       match query with
       | Client query ->
@@ -128,22 +132,32 @@ let main ~me ~host_and_ports () =
           Deferred.unit
       | Commit
           Server_commit_rpcs.Request.
-            { replica_number; view; message; sequence_number } -> (
+            { replica_number; view; message; sequence_number } ->
           ignore (replica_number, sequence_number);
           let Client_to_server_rpcs.Request.
                 { operation; timestamp; name_of_client } =
             message
           in
-          data := Interface.Operation.apply !data operation;
-          let response =
-            Client_to_server_rpcs.Response.create ~result:!data ~view ~timestamp
-              ~replica_number:me
+          let should_commit log sequence_number =
+            Map.find log sequence_number
+            |> Option.value ~default:0
+            |> Int.equal ((2 * f) + 1)
           in
-          match
-            Client_connection_manager.write_to_client ~name_of_client response
-          with
-          | Error _ -> Deferred.unit
-          | Ok _ -> Deferred.unit ))
+          commit_log :=
+            Map.update !commit_log sequence_number
+              ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
+          if should_commit !commit_log sequence_number then (
+            data := Interface.Operation.apply !data operation;
+            let response =
+              Client_to_server_rpcs.Response.create ~result:!data ~view
+                ~timestamp ~replica_number:me
+            in
+            match
+              Client_connection_manager.write_to_client ~name_of_client response
+            with
+            | Error _ -> Deferred.unit
+            | Ok _ -> Deferred.unit )
+          else Deferred.unit)
 
 let command =
   Command.async ~summary:"Server"

@@ -12,7 +12,7 @@ let write_to_client message ~name_of_client =
   Mutex.unlock mux;
   match pipe with
   | None -> Or_error.errorf "No client with name %s" name_of_client
-  | Some pipe -> Or_error.return (Pipe.write pipe message)
+  | Some pipe -> Or_error.return (Pipe.write_if_open pipe message)
 
 let establish_communication _state query =
   let name_of_client = Client_to_server_rpcs.Hello.name_of_client query in

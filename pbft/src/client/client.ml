@@ -2,18 +2,49 @@ open Core
 open Async
 open Rpcs
 
+(* Problem: If multiple webapps open, they would be hooked to this client, and the client will send messages alternately in a round-robin fashion.
+ *)
+
+(* Solution: Give pipes to every webapp browser tab that is launched, and close that pipe when the tab exits *)
+
 let operation_r, operation_w = Pipe.create ()
 
 let data_r, data_w = Pipe.create ()
 
+let aggregate_data_write_list, data_write_mux =
+  (ref Int.Map.empty, Mutex.create ())
+
+let () =
+  let rec loop () =
+    match%bind Pipe.read data_r with
+    | `Eof -> Deferred.unit
+    | `Ok x ->
+        Mutex.lock data_write_mux;
+        let%bind () =
+          Deferred.Map.iter !aggregate_data_write_list ~f:(fun w ->
+              Pipe.write_if_open w x)
+        in
+        Mutex.unlock data_write_mux;
+        loop ()
+  in
+  don't_wait_for (loop ())
+
 let operation_implementation =
   Rpc.One_way.implement App_to_client_rpcs.operation_rpc (fun _state query ->
-      Pipe.write_without_pushback operation_w query)
+      Pipe.write_without_pushback_if_open operation_w query)
 
 let data_implementation =
   Rpc.Pipe_rpc.implement App_to_client_rpcs.data_rpc (fun _state _query ->
       let r, w = Pipe.create () in
-      don't_wait_for (Pipe.transfer data_r w ~f:Fn.id);
+      Mutex.lock data_write_mux;
+      let key = Map.length !aggregate_data_write_list in
+      aggregate_data_write_list :=
+        Map.add_exn !aggregate_data_write_list ~key ~data:w;
+      Mutex.unlock data_write_mux;
+      upon (Pipe.closed r) (fun () ->
+          Mutex.lock data_write_mux;
+          aggregate_data_write_list := Map.remove !aggregate_data_write_list key;
+          Mutex.unlock data_write_mux);
       Deferred.return (Result.return r))
 
 let implementations =
@@ -57,7 +88,7 @@ let main_loop f addresses name =
             match r with
             | Error _ -> Deferred.unit
             | Ok (r, _) ->
-                let%bind () = Pipe.transfer r w ~f:Fn.id in
+                let%bind () = Pipe.transfer_id r w in
                 loop address w ) )
   in
   let pipe =
@@ -76,7 +107,7 @@ let main_loop f addresses name =
       let key = Record_manager.Key.create timestamp in
       let%bind () = Record_manager.update key ~data ~replica_number in
       let%bind size = Record_manager.size key ~data in
-      if size = f + 1 then Pipe.write data_w data else Deferred.unit)
+      if size = f + 1 then Pipe.write_if_open data_w data else Deferred.unit)
 
 let command =
   Command.async ~summary:""
@@ -106,7 +137,6 @@ let command =
       let%bind _ =
         Tcp.Server.create ~on_handler_error:`Ignore
           (Tcp.Where_to_listen.of_port 80) (fun _ reader writer ->
-            printf "connected\n";
             let app_to_ws, ws_write = Pipe.create () in
             let ws_read, ws_to_app = Pipe.create () in
             don't_wait_for
@@ -117,6 +147,8 @@ let command =
             let pipe_r, pipe_w =
               let r1, w1 = Pipe.create () in
               let r2, w2 = Pipe.create () in
+              upon (Pipe.closed ws_read) (fun () -> Pipe.close_read r1);
+              upon (Pipe.closed ws_write) (fun () -> Pipe.close w2);
               don't_wait_for
                 (Pipe.transfer ws_read w1
                    ~f:(fun Websocket.Frame.{ opcode; extension; final; content }
@@ -127,7 +159,7 @@ let command =
                      content));
               don't_wait_for
                 (Pipe.iter r2 ~f:(fun content ->
-                     Pipe.write ws_write
+                     Pipe.write_if_open ws_write
                        (Websocket.Frame.create
                           ~opcode:Websocket.Frame.Opcode.Binary ~content ())));
               (r1, w2)
