@@ -91,6 +91,7 @@ let main ~me ~host_and_ports () =
     List.map rws ~f:(fun (_, _, w) -> w)
   in
   let is_leader view = view % n = me in
+  let prepare_log = ref Int.Map.empty in
   let commit_log = ref Int.Map.empty in
   Pipe.iter request_reader ~f:(fun query ->
       match query with
@@ -126,14 +127,25 @@ let main ~me ~host_and_ports () =
             Server_commit_rpcs.Request.create ~replica_number ~view ~message
               ~sequence_number
           in
-          List.iter writes ~f:(fun w ->
-              Pipe.write_without_pushback w (fun connection ->
-                  Rpc.One_way.dispatch Server_commit_rpcs.rpc connection request));
-          Deferred.unit
+          let should_prepare log sequence_number =
+            Map.find log sequence_number
+            |> Option.value ~default:0
+            |> Int.equal ((2 * f) + 1)
+          in
+          prepare_log :=
+            Map.update !prepare_log sequence_number
+              ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
+          if should_prepare !prepare_log sequence_number then (
+            List.iter writes ~f:(fun w ->
+                Pipe.write_without_pushback w (fun connection ->
+                    Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
+                      request));
+            Deferred.unit )
+          else Deferred.unit
       | Commit
           Server_commit_rpcs.Request.
             { replica_number; view; message; sequence_number } ->
-          ignore (replica_number, sequence_number);
+          ignore replica_number;
           let Client_to_server_rpcs.Request.
                 { operation; timestamp; name_of_client } =
             message

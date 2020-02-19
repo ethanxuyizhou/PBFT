@@ -11,23 +11,23 @@ let operation_r, operation_w = Pipe.create ()
 
 let data_r, data_w = Pipe.create ()
 
-let aggregate_data_write_list, data_write_mux =
+let browser_tab_writer_list, browser_tab_writer_mux =
   (ref Int.Map.empty, Mutex.create ())
 
 let () =
-  let rec loop () =
+  let rec send_data_updates_to_all_browser_tabs () =
     match%bind Pipe.read data_r with
     | `Eof -> Deferred.unit
     | `Ok x ->
-        Mutex.lock data_write_mux;
+        Mutex.lock browser_tab_writer_mux;
         let%bind () =
-          Deferred.Map.iter !aggregate_data_write_list ~f:(fun w ->
+          Deferred.Map.iter !browser_tab_writer_list ~f:(fun w ->
               Pipe.write_if_open w x)
         in
-        Mutex.unlock data_write_mux;
-        loop ()
+        Mutex.unlock browser_tab_writer_mux;
+        send_data_updates_to_all_browser_tabs ()
   in
-  don't_wait_for (loop ())
+  don't_wait_for (send_data_updates_to_all_browser_tabs ())
 
 let operation_implementation =
   Rpc.One_way.implement App_to_client_rpcs.operation_rpc (fun _state query ->
@@ -36,15 +36,15 @@ let operation_implementation =
 let data_implementation =
   Rpc.Pipe_rpc.implement App_to_client_rpcs.data_rpc (fun _state _query ->
       let r, w = Pipe.create () in
-      Mutex.lock data_write_mux;
-      let key = Map.length !aggregate_data_write_list in
-      aggregate_data_write_list :=
-        Map.add_exn !aggregate_data_write_list ~key ~data:w;
-      Mutex.unlock data_write_mux;
+      Mutex.lock browser_tab_writer_mux;
+      let key = Map.length !browser_tab_writer_list in
+      browser_tab_writer_list :=
+        Map.add_exn !browser_tab_writer_list ~key ~data:w;
+      Mutex.unlock browser_tab_writer_mux;
       upon (Pipe.closed r) (fun () ->
-          Mutex.lock data_write_mux;
-          aggregate_data_write_list := Map.remove !aggregate_data_write_list key;
-          Mutex.unlock data_write_mux);
+          Mutex.lock browser_tab_writer_mux;
+          browser_tab_writer_list := Map.remove !browser_tab_writer_list key;
+          Mutex.unlock browser_tab_writer_mux);
       Deferred.return (Result.return r))
 
 let implementations =
@@ -52,25 +52,25 @@ let implementations =
     ~implementations:[ operation_implementation; data_implementation ]
     ~on_unknown_rpc:`Close_connection
 
-let send_update ~addresses query =
-  let send_update_to_address address =
+let send_request_to_pbft_servers ~addresses request =
+  let send_request_to_address address =
     match%bind Rpc.Connection.client address with
     | Error _ -> Deferred.unit
     | Ok connection ->
         let (_ : unit Or_error.t) =
           Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc connection
-            query
+            request
         in
         Rpc.Connection.close connection
   in
   let key =
-    Record_manager.Key.create (Client_to_server_rpcs.Request.timestamp query)
+    Record_manager.Key.create (Client_to_server_rpcs.Request.timestamp request)
   in
   match%bind Record_manager.has_received_reply key with
-  | false -> Deferred.List.iter addresses ~f:send_update_to_address
+  | false -> Deferred.List.iter addresses ~f:send_request_to_address
   | true -> Deferred.unit
 
-let main_loop f addresses name =
+let collect_commits_from_pbft_servers f addresses name =
   let rec loop address w =
     match%bind Rpc.Connection.client address with
     | Error _ ->
@@ -122,7 +122,7 @@ let command =
       let addresses =
         List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
       in
-      don't_wait_for (main_loop f addresses name);
+      don't_wait_for (collect_commits_from_pbft_servers f addresses name);
       don't_wait_for
         (Pipe.iter operation_r ~f:(fun operation' ->
              let request =
@@ -133,7 +133,7 @@ let command =
                    name_of_client = name;
                  }
              in
-             send_update ~addresses request));
+             send_request_to_pbft_servers ~addresses request));
       let%bind _ =
         Tcp.Server.create ~on_handler_error:`Ignore
           (Tcp.Where_to_listen.of_port 80) (fun _ reader writer ->
