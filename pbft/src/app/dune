@@ -1,5 +1,0 @@
-(executables 
-  (names pbft)
-  (libraries uri incr_dom core_kernel async_kernel async_js rpcs)
-  (preprocess (pps js_of_ocaml-ppx ppx_jane))
-)

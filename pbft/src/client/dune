@@ -1,5 +1,5 @@
-(executable
- (name client)
- (libraries core async rpcs websocket-async)
- (preprocess (pps ppx_jane))
+(executables 
+  (names client)
+  (libraries uri incr_dom core_kernel async_kernel async_js rpcs)
+  (preprocess (pps js_of_ocaml-ppx ppx_jane))
 )
