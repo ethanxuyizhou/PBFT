@@ -169,6 +169,7 @@ let main ~me ~host_and_ports () =
             with
             | Error _ -> Deferred.unit
             | Ok _ -> Deferred.unit )
+
           else Deferred.unit)
 
 let command =
