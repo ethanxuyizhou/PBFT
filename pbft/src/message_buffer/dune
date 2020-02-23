@@ -1,5 +1,5 @@
 (executable
  (name message_buffer)
- (libraries core async rpcs websocket-async)
+ (libraries core async rpcs websocket-async common)
  (preprocess (pps ppx_jane))
 )

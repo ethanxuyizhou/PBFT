@@ -1,8 +1,7 @@
 open Core
 open Async
 open Rpcs
-
-let data = ref (Interface.Data.init ())
+open Common
 
 type request =
   | Client of Client_to_server_rpcs.Request.t
@@ -10,7 +9,13 @@ type request =
   | Prepare of Server_prepare_rpcs.Request.t
   | Commit of Server_commit_rpcs.Request.t
 
+(* Global data structure *)
+
+let data = ref (Interface.Data.init ())
+
 let request_reader, request_writer = Pipe.create ()
+
+(* End of global data structre *)
 
 let client_request_implementation =
   Rpc.One_way.implement Client_to_server_rpcs.request_rpc (fun _state query ->
@@ -33,7 +38,7 @@ let commit_implementation =
       don't_wait_for (Pipe.write request_writer (Commit query)))
 
 (*
-let view_change_implementation =
+let view_change_implementation =c
   Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (View_change query)))
 
@@ -55,14 +60,38 @@ let implementations =
   Rpc.Implementations.create_exn ~implementations
     ~on_unknown_rpc:`Close_connection
 
+module Log = struct
+  type 'a t = { record : 'a Int.Map.t; threshold : int }
+
+  let create ~threshold = { record = Int.Map.empty; threshold }
+
+  let update { record; threshold } ~key =
+    {
+      record =
+        Map.update record key
+          ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
+      threshold;
+    }
+
+  let has_reached_threshold { record; threshold } ~key =
+    Map.find record key |> Option.value ~default:0
+    |> Int.equal ((2 * threshold) + 1)
+end
+
 (* Read what client has requested and forwards the message back to client *)
 let main ~me ~host_and_ports () =
   let sequence_num = ref 0 in
   let current_view = ref 0 in
   let n = List.length host_and_ports in
-  let f = (n - 1) / 3 in
+  let num_of_faulty_nodes = number_of_faulty_nodes ~n in
   let where_to_connects =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
+  in
+  let prepare_log =
+    ref (Log.create ~threshold:((2 * num_of_faulty_nodes) + 1))
+  in
+  let commit_log =
+    ref (Log.create ~threshold:((2 * num_of_faulty_nodes) + 1))
   in
   let rec loop where_to_connect r =
     match%bind Rpc.Connection.client where_to_connect with
@@ -91,8 +120,6 @@ let main ~me ~host_and_ports () =
     List.map rws ~f:(fun (_, _, w) -> w)
   in
   let is_leader view = view % n = me in
-  let prepare_log = ref Int.Map.empty in
-  let commit_log = ref Int.Map.empty in
   Pipe.iter request_reader ~f:(fun query ->
       match query with
       | Client query ->
@@ -127,15 +154,8 @@ let main ~me ~host_and_ports () =
             Server_commit_rpcs.Request.create ~replica_number ~view ~message
               ~sequence_number
           in
-          let should_prepare log sequence_number =
-            Map.find log sequence_number
-            |> Option.value ~default:0
-            |> Int.equal ((2 * f) + 1)
-          in
-          prepare_log :=
-            Map.update !prepare_log sequence_number
-              ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
-          if should_prepare !prepare_log sequence_number then (
+          prepare_log := Log.update !prepare_log ~key:sequence_number;
+          if Log.has_reached_threshold !prepare_log ~key:sequence_number then (
             List.iter writes ~f:(fun w ->
                 Pipe.write_without_pushback w (fun connection ->
                     Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
@@ -150,15 +170,8 @@ let main ~me ~host_and_ports () =
                 { operation; timestamp; name_of_client } =
             message
           in
-          let should_commit log sequence_number =
-            Map.find log sequence_number
-            |> Option.value ~default:0
-            |> Int.equal ((2 * f) + 1)
-          in
-          commit_log :=
-            Map.update !commit_log sequence_number
-              ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
-          if should_commit !commit_log sequence_number then (
+          commit_log := Log.update !commit_log ~key:sequence_number;
+          if Log.has_reached_threshold !commit_log ~key:sequence_number then (
             data := Interface.Operation.apply !data operation;
             let response =
               Client_to_server_rpcs.Response.create ~result:!data ~view
@@ -169,7 +182,6 @@ let main ~me ~host_and_ports () =
             with
             | Error _ -> Deferred.unit
             | Ok _ -> Deferred.unit )
-
           else Deferred.unit)
 
 let command =

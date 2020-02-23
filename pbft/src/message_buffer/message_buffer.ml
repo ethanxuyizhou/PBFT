@@ -1,6 +1,7 @@
 open Core
 open Async
 open Rpcs
+open Common
 
 (* Global data structures kept to facilitate asynchronous message sending and receiving *)
 let client_request_reader, client_request_writer = Pipe.create ()
@@ -9,7 +10,9 @@ let server_response_reader, server_response_writer = Pipe.create ()
 
 let browser_tab_writer_list, browser_tab_writer_mux =
   (ref Int.Map.empty, Mutex.create ())
-  
+
+let record = ref (Record_manager.create ())
+
 (* End of global data structures*)
 
 (* Kicks off the loop that reads what data needs to be sent to the client,
@@ -66,7 +69,7 @@ let send_request_to_pbft_servers ~addresses request =
   let key =
     Record_manager.Key.create (Client_to_server_rpcs.Request.timestamp request)
   in
-  match%bind Record_manager.has_received_reply key with
+  match Record_manager.has_received_reply !record ~key with
   | false -> Deferred.List.iter addresses ~f:send_request_to_address
   | true -> Deferred.unit
 
@@ -105,24 +108,30 @@ let collect_commits_from_pbft_servers f addresses name =
       let replica_number = Response.replica_number response in
       let data = Response.result response in
       let key = Record_manager.Key.create timestamp in
-      let%bind () = Record_manager.update key ~data ~replica_number in
-      let%bind size = Record_manager.size key ~data in
-      if size = f + 1 then Pipe.write_if_open server_response_writer data else Deferred.unit)
+      record := Record_manager.update !record ~key ~data ~replica_number;
+      let size = Record_manager.size !record ~key ~data in
+      if size = f + 1 then Pipe.write_if_open server_response_writer data
+      else Deferred.unit)
 
 let command =
-  Command.async ~summary:"Acts as a message buffer between PBFT servers and client webapp"
+  Command.async
+    ~summary:"Acts as a message buffer between PBFT servers and client webapp"
     (let open Command.Let_syntax in
     let%map_open host_and_ports =
-      flag "-host-and-port" (listed host_and_port) ~doc:"Host_and_port of all servers"
+      flag "-host-and-port" (listed host_and_port)
+        ~doc:"Host_and_port of all servers"
     and name = flag "-name" (required string) ~doc:"Name of the client" in
     fun () ->
       let open Deferred.Let_syntax in
       let open Async_rpc_kernel in
-      let f = (List.length host_and_ports - 1) / 3 in
       let addresses =
         List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
       in
-      don't_wait_for (collect_commits_from_pbft_servers f addresses name);
+      let num_of_faulty_nodes =
+        number_of_faulty_nodes ~n:(List.length addresses)
+      in
+      don't_wait_for
+        (collect_commits_from_pbft_servers num_of_faulty_nodes addresses name);
       don't_wait_for
         (Pipe.iter client_request_reader ~f:(fun operation' ->
              let request =

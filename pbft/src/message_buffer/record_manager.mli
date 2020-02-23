@@ -1,5 +1,4 @@
-open Core_kernel
-open Async_kernel
+open Core
 open Rpcs
 
 module Key : sig
@@ -8,8 +7,12 @@ module Key : sig
   val create : Time.t -> t
 end
 
-val has_received_reply : Key.t -> bool Deferred.t
+type t
 
-val update : Key.t -> data:Interface.Data.t -> replica_number:int -> unit Deferred.t
+val create : unit -> t
 
-val size : Key.t -> data:Interface.Data.t -> int Deferred.t
+val has_received_reply : t -> key:Key.t -> bool
+
+val update : t -> key:Key.t -> data:Interface.Data.t -> replica_number:int -> t
+
+val size : t -> key:Key.t -> data:Interface.Data.t -> int
