@@ -56,8 +56,8 @@ let update { record; mux } ~key ~data ~replica_number =
 
 let size { record; mux } ~key ~data =
   Mutex.lock mux;
-  let length =
+  let size =
     Option.value_map (Time.Map.find record key) ~default:0 ~f:(Value.size ~data)
   in
   Mutex.unlock mux;
-  length
+  size

@@ -5,10 +5,10 @@ open Interface
 module Request = struct
   type t = {
     operation : Operation.t;
-    timestamp : Time.t;
+    timestamp : Time.Stable.With_utc_sexp.V2.t;
     name_of_client : string;
   }
-  [@@deriving bin_io, fields]
+  [@@deriving bin_io, fields, sexp, compare]
 end
 
 module Hello = struct

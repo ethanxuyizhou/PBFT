@@ -4,6 +4,7 @@ open Async_rpc_kernel
 module Request = struct
   (* Optimization: send a digest instead of the entire operation *)
   type t = {
+    leader_number : int;
     view : int;
     message : Client_to_server_rpcs.Request.t;
     sequence_number : int;

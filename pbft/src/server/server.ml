@@ -60,23 +60,27 @@ let implementations =
   Rpc.Implementations.create_exn ~implementations
     ~on_unknown_rpc:`Close_connection
 
-module Log = struct
-  type 'a t = { record : 'a Int.Map.t; threshold : int }
+module A = struct
+  module Key = struct
+    module S = struct
+      type t = { view : int; sequence_number : int } [@@deriving sexp, compare]
+    end
 
-  let create ~threshold = { record = Int.Map.empty; threshold }
+    include S
+    include Comparable.Make (S)
+  end
 
-  let update { record; threshold } ~key =
-    {
-      record =
-        Map.update record key
-          ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1));
-      threshold;
-    }
+  module Data = struct
+    module S = struct
+      type t = Client_to_server_rpcs.Request.t [@@deriving sexp, compare]
+    end
 
-  let has_reached_threshold { record; threshold } ~key =
-    Map.find record key |> Option.value ~default:0
-    |> Int.equal ((2 * threshold) + 1)
+    include S
+    include Comparable.Make (S)
+  end
 end
+
+module Log = Log (A)
 
 (* Read what client has requested and forwards the message back to client *)
 let main ~me ~host_and_ports () =
@@ -87,12 +91,9 @@ let main ~me ~host_and_ports () =
   let where_to_connects =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
-  let prepare_log =
-    ref (Log.create ~threshold:((2 * num_of_faulty_nodes) + 1))
-  in
-  let commit_log =
-    ref (Log.create ~threshold:((2 * num_of_faulty_nodes) + 1))
-  in
+  let preprepare_log = ref (Log.create ()) in
+  let prepare_log = ref (Log.create ()) in
+  let commit_log = ref (Log.create ()) in
   let rec loop where_to_connect r =
     match%bind Rpc.Connection.client where_to_connect with
     | Error _ -> loop where_to_connect r
@@ -128,6 +129,7 @@ let main ~me ~host_and_ports () =
             let request =
               Server_preprepare_rpcs.Request.
                 {
+                  leader_number = me;
                   view = !current_view;
                   message = query;
                   sequence_number = !sequence_num;
@@ -139,39 +141,61 @@ let main ~me ~host_and_ports () =
                       request));
             Deferred.unit )
           else Deferred.unit
-      | Preprepare { view; message; sequence_number } ->
-          let request =
-            Server_prepare_rpcs.Request.create ~replica_number:me ~view ~message
-              ~sequence_number
+      | Preprepare { leader_number; view; message; sequence_number } ->
+          let accept =
+            (view = !current_view && leader_number = !current_view % n)
+            && Log.size !preprepare_log ~key:{ view; sequence_number }
+                 ~data:message
+               = 0
           in
-          List.iter writes ~f:(fun w ->
-              Pipe.write_without_pushback w (fun connection ->
-                  Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
-                    request));
-          Deferred.unit
-      | Prepare { replica_number; view; message; sequence_number } ->
-          let request =
-            Server_commit_rpcs.Request.create ~replica_number ~view ~message
-              ~sequence_number
-          in
-          prepare_log := Log.update !prepare_log ~key:sequence_number;
-          if Log.has_reached_threshold !prepare_log ~key:sequence_number then (
+          if accept then (
+            preprepare_log :=
+              Log.update !preprepare_log ~key:{ view; sequence_number }
+                ~data:message ~replica_number:leader_number;
+            let request =
+              Server_prepare_rpcs.Request.create ~replica_number:me ~view
+                ~message ~sequence_number
+            in
             List.iter writes ~f:(fun w ->
                 Pipe.write_without_pushback w (fun connection ->
-                    Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
+                    Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
                       request));
             Deferred.unit )
+          else Deferred.unit
+      | Prepare { replica_number; view; message; sequence_number } ->
+          if view = !current_view then (
+            prepare_log :=
+              Log.update !prepare_log ~key:{ view; sequence_number }
+                ~data:message ~replica_number;
+            let request =
+              Server_commit_rpcs.Request.create ~replica_number:me ~view
+                ~message ~sequence_number
+            in
+            if
+              Log.size !prepare_log ~key:{ view; sequence_number } ~data:message
+              = (2 * num_of_faulty_nodes) + 1
+            then (
+              List.iter writes ~f:(fun w ->
+                  Pipe.write_without_pushback w (fun connection ->
+                      Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
+                        request));
+              Deferred.unit )
+            else Deferred.unit )
           else Deferred.unit
       | Commit
           Server_commit_rpcs.Request.
             { replica_number; view; message; sequence_number } ->
-          ignore replica_number;
           let Client_to_server_rpcs.Request.
                 { operation; timestamp; name_of_client } =
             message
           in
-          commit_log := Log.update !commit_log ~key:sequence_number;
-          if Log.has_reached_threshold !commit_log ~key:sequence_number then (
+          commit_log :=
+            Log.update !commit_log ~key:{ view; sequence_number } ~data:message
+              ~replica_number;
+          if
+            Log.size !commit_log ~key:{ view; sequence_number } ~data:message
+            = (2 * num_of_faulty_nodes) + 1
+          then (
             data := Interface.Operation.apply !data operation;
             let response =
               Client_to_server_rpcs.Response.create ~result:!data ~view

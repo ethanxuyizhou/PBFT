@@ -11,7 +11,29 @@ let server_response_reader, server_response_writer = Pipe.create ()
 let browser_tab_writer_list, browser_tab_writer_mux =
   (ref Int.Map.empty, Mutex.create ())
 
-let record = ref (Record_manager.create ())
+module Key_data = struct
+  module Key = struct
+    module S = struct
+      type t = Time.t [@@deriving sexp, compare]
+    end
+
+    include S
+    include Comparable.Make (S)
+  end
+
+  module Data = struct
+    module S = struct
+      type t = Interface.Data.t [@@deriving sexp, compare]
+    end
+
+    include S
+    include Comparable.Make (S)
+  end
+end
+
+module Log = Log (Key_data)
+
+let record = ref (Log.create ())
 
 (* End of global data structures*)
 
@@ -55,7 +77,7 @@ let implementations =
     ~implementations:[ operation_implementation; data_implementation ]
     ~on_unknown_rpc:`Close_connection
 
-let send_request_to_pbft_servers ~addresses request =
+let send_request_to_pbft_servers ~num_of_faulty_nodes addresses request =
   let send_request_to_address address =
     match%bind Rpc.Connection.client address with
     | Error _ -> Deferred.unit
@@ -66,14 +88,14 @@ let send_request_to_pbft_servers ~addresses request =
         in
         Rpc.Connection.close connection
   in
-  let key =
-    Record_manager.Key.create (Client_to_server_rpcs.Request.timestamp request)
-  in
-  match Record_manager.has_received_reply !record ~key with
+  let key = Client_to_server_rpcs.Request.timestamp request in
+  match
+    Log.has_reached_consensus !record ~key ~threshold:(num_of_faulty_nodes + 1)
+  with
   | false -> Deferred.List.iter addresses ~f:send_request_to_address
   | true -> Deferred.unit
 
-let collect_commits_from_pbft_servers f addresses name =
+let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
   let rec loop address w =
     match%bind Rpc.Connection.client address with
     | Error _ ->
@@ -107,10 +129,11 @@ let collect_commits_from_pbft_servers f addresses name =
       let timestamp = Response.timestamp response in
       let replica_number = Response.replica_number response in
       let data = Response.result response in
-      let key = Record_manager.Key.create timestamp in
-      record := Record_manager.update !record ~key ~data ~replica_number;
-      let size = Record_manager.size !record ~key ~data in
-      if size = f + 1 then Pipe.write_if_open server_response_writer data
+      let key = timestamp in
+      record := Log.update !record ~key ~data ~replica_number;
+      let size = Log.size !record ~key ~data in
+      if size = num_of_faulty_nodes + 1 then
+        Pipe.write_if_open server_response_writer data
       else Deferred.unit)
 
 let command =
@@ -131,7 +154,7 @@ let command =
         number_of_faulty_nodes ~n:(List.length addresses)
       in
       don't_wait_for
-        (collect_commits_from_pbft_servers num_of_faulty_nodes addresses name);
+        (collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name);
       don't_wait_for
         (Pipe.iter client_request_reader ~f:(fun operation' ->
              let request =
@@ -142,7 +165,7 @@ let command =
                    name_of_client = name;
                  }
              in
-             send_request_to_pbft_servers ~addresses request));
+             send_request_to_pbft_servers ~num_of_faulty_nodes addresses request));
       let%bind _ =
         Tcp.Server.create ~on_handler_error:`Ignore
           (Tcp.Where_to_listen.of_port 80) (fun _ reader writer ->
