@@ -40,7 +40,7 @@ let commit_implementation =
       don't_wait_for (Pipe.write request_writer (Commit query)))
 
 (*
-let view_change_implementation =c
+let view_change_implementation =
   Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (View_change query)))
 
@@ -98,7 +98,9 @@ let main ~me ~host_and_ports () =
   let commit_log = ref (Log.create ()) in
   let rec loop where_to_connect r =
     match%bind Rpc.Connection.client where_to_connect with
-    | Error _ -> loop where_to_connect r
+    | Error _ ->
+        let%bind () = after Time.Span.second in
+        loop where_to_connect r
     | Ok connection ->
         let rec sub_loop () =
           match%bind Pipe.read r with
@@ -107,6 +109,7 @@ let main ~me ~host_and_ports () =
               match query connection with
               | Error _ ->
                   let%bind () = Rpc.Connection.close connection in
+                  let%bind () = after Time.Span.second in
                   loop where_to_connect r
               | Ok _ -> sub_loop () )
         in

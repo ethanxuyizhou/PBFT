@@ -123,7 +123,6 @@ let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
         r)
     |> Pipe.interleave
   in
-  let%bind () = after Time.Span.second in
   Pipe.iter pipe ~f:(fun response ->
       let open Client_to_server_rpcs in
       let timestamp = Response.timestamp response in
