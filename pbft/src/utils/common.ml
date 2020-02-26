@@ -3,7 +3,7 @@ include Common_intf
 
 let number_of_faulty_nodes ~n = (n - 1) / 3
 
-module Log (Key_data : Key_data) = struct
+module Make_consensus_log (Key_data : Key_data) = struct
   open Key_data
 
   module Value = struct

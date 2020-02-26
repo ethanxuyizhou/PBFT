@@ -1,6 +1,7 @@
 val number_of_faulty_nodes : n:int -> int
 
-module Log (S : Common_intf.Key_data) : sig
+(* Thread-safe log for storing data to achieve PBFT consensus. *)
+module Make_consensus_log (S : Common_intf.Key_data) : sig
   type t
 
   val create : unit -> t

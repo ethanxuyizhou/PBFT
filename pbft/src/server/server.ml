@@ -15,6 +15,8 @@ let data = ref (Interface.Data.init ())
 
 let request_reader, request_writer = Pipe.create ()
 
+let connection_states = Client_connection_manager.create ()
+
 (* End of global data structre *)
 
 let client_request_implementation =
@@ -23,7 +25,7 @@ let client_request_implementation =
 
 let client_response_implementation =
   Rpc.Pipe_rpc.implement Client_to_server_rpcs.response_rpc
-    Client_connection_manager.establish_communication
+    (Client_connection_manager.establish_communication connection_states)
 
 let preprepare_implementation =
   Rpc.One_way.implement Server_preprepare_rpcs.rpc (fun _state query ->
@@ -60,7 +62,7 @@ let implementations =
   Rpc.Implementations.create_exn ~implementations
     ~on_unknown_rpc:`Close_connection
 
-module A = struct
+module Key_data = struct
   module Key = struct
     module S = struct
       type t = { view : int; sequence_number : int } [@@deriving sexp, compare]
@@ -80,7 +82,7 @@ module A = struct
   end
 end
 
-module Log = Log (A)
+module Log = Make_consensus_log (Key_data)
 
 (* Read what client has requested and forwards the message back to client *)
 let main ~me ~host_and_ports () =
@@ -202,7 +204,8 @@ let main ~me ~host_and_ports () =
                 ~timestamp ~replica_number:me
             in
             match
-              Client_connection_manager.write_to_client ~name_of_client response
+              Client_connection_manager.write_to_client connection_states
+                ~name_of_client response
             with
             | Error _ -> Deferred.unit
             | Ok _ -> Deferred.unit )

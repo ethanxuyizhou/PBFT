@@ -31,7 +31,7 @@ module Key_data = struct
   end
 end
 
-module Log = Log (Key_data)
+module Log = Make_consensus_log (Key_data)
 
 let record = ref (Log.create ())
 
