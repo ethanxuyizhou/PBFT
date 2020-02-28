@@ -1,5 +1,5 @@
 (library
    (name common)
-   (libraries core rpcs)
-   (preprocess (pps js_of_ocaml-ppx ppx_jane))
+   (libraries core async rpcs)
+   (preprocess (pps ppx_jane))
  )

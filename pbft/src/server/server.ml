@@ -90,39 +90,20 @@ let main ~me ~host_and_ports () =
   let current_view = ref 0 in
   let n = List.length host_and_ports in
   let num_of_faulty_nodes = number_of_faulty_nodes ~n in
-  let where_to_connects =
+  let addresses =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
   let preprepare_log = ref (Log.create ()) in
   let prepare_log = ref (Log.create ()) in
   let commit_log = ref (Log.create ()) in
-  let rec loop where_to_connect r =
-    match%bind Rpc.Connection.client where_to_connect with
-    | Error _ ->
-        let%bind () = after Time.Span.second in
-        loop where_to_connect r
-    | Ok connection ->
-        let rec sub_loop () =
-          match%bind Pipe.read r with
-          | `Eof -> Deferred.unit
-          | `Ok query -> (
-              match query connection with
-              | Error _ ->
-                  let%bind () = Rpc.Connection.close connection in
-                  let%bind () = after Time.Span.second in
-                  loop where_to_connect r
-              | Ok _ -> sub_loop () )
-        in
-        sub_loop ()
-  in
   let writes =
     let rws =
-      List.map where_to_connects ~f:(fun where_to_connect ->
+      List.map addresses ~f:(fun address ->
           let r, w = Pipe.create () in
-          (where_to_connect, r, w))
+          (address, r, w))
     in
-    List.iter rws ~f:(fun (where_to_connect, r, _) ->
-        don't_wait_for (loop where_to_connect r));
+    List.iter rws ~f:(fun (address, r, _) ->
+        don't_wait_for (transfer_message_from_pipe_to_address r address));
     List.map rws ~f:(fun (_, _, w) -> w)
   in
   let is_leader view = view % n = me in
@@ -142,8 +123,9 @@ let main ~me ~host_and_ports () =
             in
             List.iter writes ~f:(fun w ->
                 Pipe.write_without_pushback w (fun connection ->
-                    Rpc.One_way.dispatch Server_preprepare_rpcs.rpc connection
-                      request));
+                    Deferred.return
+                      (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
+                         connection request)));
             Deferred.unit )
           else Deferred.unit
       | Preprepare { leader_number; view; message; sequence_number } ->
@@ -163,8 +145,9 @@ let main ~me ~host_and_ports () =
             in
             List.iter writes ~f:(fun w ->
                 Pipe.write_without_pushback w (fun connection ->
-                    Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
-                      request));
+                    Deferred.return
+                      (Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
+                         request)));
             Deferred.unit )
           else Deferred.unit
       | Prepare { replica_number; view; message; sequence_number } ->
@@ -182,8 +165,9 @@ let main ~me ~host_and_ports () =
             then (
               List.iter writes ~f:(fun w ->
                   Pipe.write_without_pushback w (fun connection ->
-                      Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
-                        request));
+                      Deferred.return
+                        (Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
+                           request)));
               Deferred.unit )
             else Deferred.unit )
           else Deferred.unit

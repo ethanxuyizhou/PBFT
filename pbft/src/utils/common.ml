@@ -1,7 +1,28 @@
 open Core
+open Async
 include Common_intf
 
 let number_of_faulty_nodes ~n = (n - 1) / 3
+
+let rec transfer_message_from_pipe_to_address ?(timeout = Time.Span.second)
+    reader address =
+  match%bind Rpc.Connection.client address with
+  | Error _ ->
+      let%bind () = after timeout in
+      transfer_message_from_pipe_to_address reader address
+  | Ok connection ->
+      let rec loop () =
+        match%bind Pipe.read reader with
+        | `Eof -> Deferred.unit
+        | `Ok f -> (
+            match%bind f connection with
+            | Error _ ->
+                let%bind () = Rpc.Connection.close connection in
+                let%bind () = after Time.Span.second in
+                transfer_message_from_pipe_to_address reader address
+            | Ok _ -> loop () )
+      in
+      loop ()
 
 module Make_consensus_log (Key_data : Key_data) = struct
   open Key_data
