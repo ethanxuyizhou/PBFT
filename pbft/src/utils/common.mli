@@ -11,6 +11,13 @@ val transfer_message_from_pipe_to_address :
   Tcp.Where_to_connect.inet ->
   unit Deferred.t
 
+val ping_for_message_stream :
+  ?timeout:Time.Span.t ->
+  'a Pipe.Writer.t ->
+  (Rpc.Connection.t -> ('a Pipe.Reader.t * 'b, 'c) result Or_error.t Deferred.t) ->
+  Tcp.Where_to_connect.inet ->
+  unit Deferred.t
+
 (* Thread-safe log for storing data to achieve PBFT consensus. *)
 module Make_consensus_log (S : Common_intf.Key_data) : sig
   type t

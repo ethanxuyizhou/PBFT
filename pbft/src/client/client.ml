@@ -79,30 +79,16 @@ let send_request_to_pbft_servers ~num_of_faulty_nodes addresses request =
   | true -> Deferred.unit
 
 let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
-  let rec loop address w =
-    match%bind Rpc.Connection.client address with
-    | Error _ ->
-        let%bind () = after Time.Span.second in
-        loop address w
-    | Ok connection -> (
-        match%bind
-          Rpc.Pipe_rpc.dispatch Client_to_server_rpcs.response_rpc connection
-            Client_to_server_rpcs.Hello.{ name_of_client = name }
-        with
-        | Error _ ->
-            let%bind () = after Time.Span.second in
-            loop address w
-        | Ok r -> (
-            match r with
-            | Error _ -> Deferred.unit
-            | Ok (r, _) ->
-                let%bind () = Pipe.transfer_id r w in
-                loop address w ) )
-  in
   let pipe =
     List.map addresses ~f:(fun address ->
         let r, w = Pipe.create () in
-        don't_wait_for (loop address w);
+        don't_wait_for
+          (ping_for_message_stream w
+             (fun connection ->
+               Rpc.Pipe_rpc.dispatch Client_to_server_rpcs.response_rpc
+                 connection
+                 Client_to_server_rpcs.Hello.{ name_of_client = name })
+             address);
         r)
     |> Pipe.interleave
   in
