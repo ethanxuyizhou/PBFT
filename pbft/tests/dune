@@ -1,5 +1,6 @@
-(executable
+(library
   (name basic_test)
-  (libraries core async)
-  (preprocess (pps ppx_inline_test))
+  (libraries core async rpcs common)
+  (inline_tests)
+  (preprocess (pps ppx_jane ppx_inline_test))
 )

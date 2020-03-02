@@ -1,22 +1,30 @@
 open Core
 open Async
 
-let run_server ~ports ~me =
+let run_server ~ports ~me ~finished =
   let args =
     let port_args =
-      List.bind ports ~f:(fun port -> [ "-port"; string_of_int port ])
+      List.bind ports ~f:(fun port ->
+          [ "-host-and-port"; sprintf "localhost:%d" port ])
     in
     let me_arg = [ "-me"; string_of_int me ] in
     me_arg @ port_args
   in
-  let open Deferred.Or_error.Let_syntax in
-  let%map _result = Process.run ~prog:"{PBFT_SERVER_DIR}/server.exe" ~args () in
+  let%map process =
+    Process.create_exn
+      ~prog:
+        "/Users/ethan/Desktop/project/ocaml/_build/default/PBFT/pbft/src/server/server.exe"
+      ~args ()
+  in
+  upon finished (fun _ ->
+      Signal.send_i Signal.kill (`Pid (Process.pid process)));
   ()
 
-let run_servers ~ports =
-  Deferred.Or_error.List.iteri ports ~f:(fun i _port -> run_server ~ports ~me:i)
+let run_servers ~ports ~finished =
+  Deferred.List.iteri ~how:`Parallel ports ~f:(fun i _port ->
+      run_server ~ports ~me:i ~finished)
 
-let run_client ~name ~server_host_and_ports =
+let run_client ~name ~server_host_and_ports ~port ~finished =
   let args =
     let name_args = [ "-name"; name ] in
     let host_and_port_args =
@@ -25,35 +33,60 @@ let run_client ~name ~server_host_and_ports =
     in
     [ "-TEST" ] @ name_args @ host_and_port_args
   in
-  let open Deferred.Or_error.Let_syntax in
-  let%map _result = Process.run ~prog:"{PBFT_CLIENT_DIR}/client.exe" ~args () in
+  let%map process =
+    Process.create_exn
+      ~env:(`Replace [ ("PBFT_TEST_CLIENT_PORT", string_of_int port) ])
+      ~prog:
+        "/Users/ethan/Desktop/project/ocaml/_build/default/PBFT/pbft/src/client/client.exe"
+      ~args ()
+  in
+  upon finished (fun _ ->
+      Signal.send_i Signal.kill (`Pid (Process.pid process)));
   ()
 
-let rec send_message port =
-  match%bind Rpc.Connection.client (Tcp.where_to_connect port) with
-  | `Eof ->
-      let%bind () = after Time.Span.second in
-      establish_connection_with_client port
-  | `Ok connection -> connection
+let setup ~server_ports ~client_port ~r ~finished =
+  let%bind () = run_servers ~ports:server_ports ~finished in
+  let server_host_and_ports =
+    List.map server_ports ~f:(sprintf "localhost:%d")
+  in
+  let%map () =
+    run_client ~name:"1" ~server_host_and_ports ~port:client_port ~finished
+  in
+  let address =
+    Tcp.Where_to_connect.of_host_and_port
+      (Host_and_port.of_string (sprintf "localhost:%d" client_port))
+  in
+  don't_wait_for (Common.transfer_message_from_pipe_to_address r address)
 
 let%expect_test _ =
+  let finished_ivar = ref (Ivar.create ()) in
+  let finished = Deferred.create (fun i -> finished_ivar := i) in
   let server_ports = [ 5000; 6000; 7000; 8000 ] in
-  let server_host_and_ports = List.map ports ~f:(sprintf "localhost:%s") in
-  let server_addresses =
-    List.map server_host_and_ports
-      ~f:(Tcp.Where_to_connect.of_host_and_port Host_and_port.of_string)
+  let client_port = 3000 in
+  let r, w = Pipe.create () in
+  let%bind () = setup ~server_ports ~client_port ~r ~finished in
+  let address =
+    Tcp.Where_to_connect.of_host_and_port
+      (Host_and_port.of_string (sprintf "localhost:%d" client_port))
   in
-  let%bind () = run_servers ~ports:server_ports in
-  let%bind () = run_client ~name:"1" ~server_host_and_ports in
-  let client_port = int_of_string (Unix.getenv_exn "PBFT_TEST_CLIENT_PORT") in
-  let rws =
-    List.map server_addresses ~f:(fun address ->
-        let r, w = Pipe.create () in
-        (r, w, address))
+  let data_r =
+    let r, w = Pipe.create () in
+    don't_wait_for
+      (Common.ping_for_message_stream w
+         (fun connection ->
+           Rpc.Pipe_rpc.dispatch Rpcs.App_to_client_rpcs.data_rpc connection ())
+         address);
+    r
   in
-  let writes = List.map rws ~f:(fun (_r, _w, address) -> address) in
-  don't_wait_for
-    (Deferred.List.iter rws ~f:(fun (r, _w, address) ->
-         transfer_message_from_pipe_to_address r));
-  let%bind connection = establish_connection_with_client port in
-  ()
+  let%bind () = after Time.Span.second in
+  let%bind () =
+    Pipe.write w (fun connection ->
+        Deferred.return
+          (Rpc.One_way.dispatch Rpcs.App_to_client_rpcs.operation_rpc connection
+             (Rpcs.Interface.Operation.Add 1)))
+  in
+  let%bind () =
+    match%map Pipe.read data_r with `Eof -> printf "" | `Ok x -> printf "%d" x
+  in
+  let%map () = [%expect {| 1 |}] in
+  Ivar.fill !finished_ivar ()
