@@ -96,6 +96,7 @@ let main ~me ~host_and_ports () =
   let preprepare_log = ref (Log.create ()) in
   let prepare_log = ref (Log.create ()) in
   let commit_log = ref (Log.create ()) in
+  let client_to_latest_timestamp = ref String.Map.empty in
   let writes =
     let rws =
       List.map addresses ~f:(fun address ->
@@ -181,11 +182,20 @@ let main ~me ~host_and_ports () =
           commit_log :=
             Log.update !commit_log ~key:{ view; sequence_number } ~data:message
               ~replica_number;
+          let is_latest_timestamp =
+            Map.find !client_to_latest_timestamp name_of_client
+            |> Option.value_map ~default:true ~f:(fun previous_timestamp ->
+                   Time.(previous_timestamp <= timestamp))
+          in
           if
-            Log.size !commit_log ~key:{ view; sequence_number } ~data:message
-            = (2 * num_of_faulty_nodes) + 1
+            is_latest_timestamp
+            && Log.size !commit_log ~key:{ view; sequence_number } ~data:message
+               = (2 * num_of_faulty_nodes) + 1
           then (
             data := Interface.Operation.apply !data operation;
+            client_to_latest_timestamp :=
+              Map.update !client_to_latest_timestamp name_of_client ~f:(fun _ ->
+                  timestamp);
             let response =
               Client_to_server_rpcs.Response.create ~result:!data ~view
                 ~timestamp ~replica_number:me
