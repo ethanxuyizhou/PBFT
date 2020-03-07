@@ -18,6 +18,17 @@ val ping_for_message_stream :
   Tcp.Where_to_connect.inet ->
   unit Deferred.t
 
+module Queue : sig
+  type 'a t
+
+  val create : unit -> 'a t
+
+  val iter_from :
+    'a t -> pos:int -> f:(int -> 'a -> unit Deferred.t) -> unit Deferred.t
+
+  val insert : 'a t -> pos:int -> 'a -> 'a t
+end
+
 (* Thread-safe log for storing data to achieve PBFT consensus. *)
 module Make_consensus_log (S : Common_intf.Key_data) : sig
   type t
@@ -29,4 +40,6 @@ module Make_consensus_log (S : Common_intf.Key_data) : sig
   val size : t -> key:S.Key.t -> data:S.Data.t -> int
 
   val has_reached_consensus : t -> key:S.Key.t -> threshold:int -> bool
+
+  val key_exists : t -> key:S.Key.t -> bool
 end

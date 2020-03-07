@@ -4,3 +4,6 @@ module App_to_client_rpcs = App_to_client_rpcs
 module Server_preprepare_rpcs = Server_preprepare_rpcs
 module Server_prepare_rpcs = Server_prepare_rpcs
 module Server_commit_rpcs = Server_commit_rpcs
+module Server_view_change_rpcs = Server_view_change_rpcs
+module Server_new_view_rpcs = Server_new_view_rpcs
+module Server_checkpoint_rpcs = Server_checkpoint_rpcs

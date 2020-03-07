@@ -42,6 +42,26 @@ let rec ping_for_message_stream ?(timeout = Time.Span.of_sec 0.5) writer ping
               let%bind () = Pipe.transfer_id reader writer in
               ping_for_message_stream ~timeout writer ping address ) )
 
+module Queue = struct
+  type 'a t = 'a Int.Map.t
+
+  let create () = Int.Map.empty
+
+  let iter_from t ~pos ~f =
+    let current_pos = ref pos in
+    let rec loop () =
+      match Map.find t !current_pos with
+      | None -> Deferred.unit
+      | Some x ->
+          let%bind () = f !current_pos x in
+          current_pos := !current_pos + 1;
+          loop ()
+    in
+    loop ()
+
+  let insert t ~pos data = Map.update t pos ~f:(fun _ -> data)
+end
+
 module Make_consensus_log (Key_data : Key_data) = struct
   open Key_data
 
@@ -93,6 +113,12 @@ module Make_consensus_log (Key_data : Key_data) = struct
     in
     Mutex.unlock mux;
     size
+
+  let key_exists { record; mux } ~key =
+    Mutex.lock mux;
+    let exists = Map.find record key |> Option.is_some in
+    Mutex.unlock mux;
+    exists
 
   let has_reached_consensus { record; mux } ~key ~threshold =
     Mutex.lock mux;

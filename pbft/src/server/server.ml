@@ -8,6 +8,9 @@ type request =
   | Preprepare of Server_preprepare_rpcs.Request.t
   | Prepare of Server_prepare_rpcs.Request.t
   | Commit of Server_commit_rpcs.Request.t
+  | View_change of Server_view_change_rpcs.Request.t
+  | New_view of Server_new_view_rpcs.Request.t
+  | Checkpoint of Server_checkpoint_rpcs.Request.t
 
 (* Global data structure *)
 
@@ -39,7 +42,6 @@ let commit_implementation =
   Rpc.One_way.implement Server_commit_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (Commit query)))
 
-(*
 let view_change_implementation =
   Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (View_change query)))
@@ -47,7 +49,10 @@ let view_change_implementation =
 let new_view_implementation =
   Rpc.One_way.implement Server_new_view_rpcs.rpc (fun _state query ->
       don't_wait_for (Pipe.write request_writer (New_view query)))
-*)
+
+let checkpoint_implementation =
+  Rpc.One_way.implement Server_checkpoint_rpcs.rpc (fun _state query ->
+      don't_wait_for (Pipe.write request_writer (Checkpoint query)))
 
 let implementations =
   let implementations =
@@ -57,6 +62,9 @@ let implementations =
       preprepare_implementation;
       prepare_implementation;
       commit_implementation;
+      view_change_implementation;
+      new_view_implementation;
+      checkpoint_implementation;
     ]
   in
   Rpc.Implementations.create_exn ~implementations
@@ -84,9 +92,36 @@ end
 
 module Log = Make_consensus_log (Key_data)
 
+module Checkpoint_key_data = struct
+  module Key = struct
+    module S = struct
+      type t = { last_sequence_number : int } [@@deriving sexp, compare]
+    end
+
+    include S
+    include Comparable.Make (S)
+  end
+
+  module Data = struct
+    module S = struct
+      type t = { state : Interface.Data.t } [@@deriving sexp, compare]
+    end
+
+    include S
+    include Comparable.Make (S)
+  end
+end
+
+module Checkpoint_log = Make_consensus_log (Checkpoint_key_data)
+
+type checkpoint = { last_sequence_number : int; state : Interface.Data.t }
+
+type commit = { operation : Interface.Operation.t; name_of_client : string }
+
 (* Read what client has requested and forwards the message back to client *)
 let main ~me ~host_and_ports () =
   let sequence_num = ref 0 in
+  let last_committed_sequence_number = ref 0 in
   let current_view = ref 0 in
   let n = List.length host_and_ports in
   let num_of_faulty_nodes = number_of_faulty_nodes ~n in
@@ -96,6 +131,11 @@ let main ~me ~host_and_ports () =
   let preprepare_log = ref (Log.create ()) in
   let prepare_log = ref (Log.create ()) in
   let commit_log = ref (Log.create ()) in
+  let checkpoint_log = ref (Checkpoint_log.create ()) in
+  let commit_queue = ref (Queue.create ()) in
+  let last_stable_checkpoint =
+    ref { last_sequence_number = -1; state = Interface.Data.init () }
+  in
   let client_to_latest_timestamp = ref String.Map.empty in
   let writes =
     let rws =
@@ -132,9 +172,8 @@ let main ~me ~host_and_ports () =
       | Preprepare { leader_number; view; message; sequence_number } ->
           let accept =
             (view = !current_view && leader_number = !current_view % n)
-            && Log.size !preprepare_log ~key:{ view; sequence_number }
-                 ~data:message
-               = 0
+            && not
+                 (Log.key_exists !preprepare_log ~key:{ view; sequence_number })
           in
           if accept then (
             preprepare_log :=
@@ -160,10 +199,16 @@ let main ~me ~host_and_ports () =
               Server_commit_rpcs.Request.create ~replica_number:me ~view
                 ~message ~sequence_number
             in
-            if
+            let is_in_preprepare_log =
+              Log.size !preprepare_log ~key:{ view; sequence_number }
+                ~data:message
+              = 1
+            in
+            let can_prepare =
               Log.size !prepare_log ~key:{ view; sequence_number } ~data:message
               = (2 * num_of_faulty_nodes) + 1
-            then (
+            in
+            if is_in_preprepare_log && can_prepare then (
               List.iter writes ~f:(fun w ->
                   Pipe.write_without_pushback w (fun connection ->
                       Deferred.return
@@ -185,19 +230,15 @@ let main ~me ~host_and_ports () =
           let is_latest_timestamp =
             Map.find !client_to_latest_timestamp name_of_client
             |> Option.value_map ~default:true ~f:(fun previous_timestamp ->
-                   Time.(previous_timestamp <= timestamp))
+                   Time.(previous_timestamp < timestamp))
           in
-          if
-            is_latest_timestamp
-            && Log.size !commit_log ~key:{ view; sequence_number } ~data:message
-               = (2 * num_of_faulty_nodes) + 1
-          then (
-            data := Interface.Operation.apply !data operation;
-            client_to_latest_timestamp :=
-              Map.update !client_to_latest_timestamp name_of_client ~f:(fun _ ->
-                  timestamp);
+          let can_commit =
+            Log.size !commit_log ~key:{ view; sequence_number } ~data:message
+            = (2 * num_of_faulty_nodes) + 1
+          in
+          let send_result_to_client data name_of_client =
             let response =
-              Client_to_server_rpcs.Response.create ~result:!data ~view
+              Client_to_server_rpcs.Response.create ~result:data ~view
                 ~timestamp ~replica_number:me
             in
             match
@@ -205,7 +246,44 @@ let main ~me ~host_and_ports () =
                 ~name_of_client response
             with
             | Error _ -> Deferred.unit
-            | Ok _ -> Deferred.unit )
+            | Ok _ -> Deferred.unit
+          in
+          if is_latest_timestamp && can_commit then (
+            commit_queue :=
+              Queue.insert !commit_queue ~pos:sequence_number
+                { operation; name_of_client };
+            if !last_committed_sequence_number + 1 = sequence_number then
+              (* execute and send result to client for every sequence_number from now on *)
+              Queue.iter_from !commit_queue ~pos:sequence_number
+                ~f:(fun sequence_number { operation; name_of_client } ->
+                  data := Interface.Operation.apply !data operation;
+                  client_to_latest_timestamp :=
+                    Map.update !client_to_latest_timestamp name_of_client
+                      ~f:(fun _ -> timestamp);
+                  last_committed_sequence_number := sequence_number;
+                  send_result_to_client !data name_of_client)
+            else Deferred.unit )
+          else Deferred.unit
+      | View_change { view; sequence_number_of_last_checkpoint; replica_number }
+        ->
+          ignore (view, sequence_number_of_last_checkpoint, replica_number);
+          Deferred.unit
+      | New_view _ -> Deferred.unit
+      | Checkpoint { last_sequence_number; state; replica_number } ->
+          checkpoint_log :=
+            Checkpoint_log.update !checkpoint_log ~key:{ last_sequence_number }
+              ~data:{ state } ~replica_number;
+          let is_checkpoint_latest =
+            last_sequence_number < !last_stable_checkpoint.last_sequence_number
+          in
+          let can_checkpoint =
+            Checkpoint_log.size !checkpoint_log ~key:{ last_sequence_number }
+              ~data:{ state }
+            = (2 * num_of_faulty_nodes) + 1
+          in
+          if is_checkpoint_latest && can_checkpoint then (
+            last_stable_checkpoint := { last_sequence_number; state };
+            Deferred.unit )
           else Deferred.unit)
 
 let command =
