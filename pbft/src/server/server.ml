@@ -297,8 +297,12 @@ let main ~me ~host_and_ports () =
                     data := Interface.Operation.apply !data operation;
                     timer := Timer.cancel !timer ~key:message;
                     client_to_latest_timestamp :=
-                      Map.update !client_to_latest_timestamp name_of_client
-                        ~f:(fun _ -> timestamp);
+                      Map.update
+                        !client_to_latest_timestamp
+                        name_of_client
+                        ~f:
+                          (Option.value_map ~f:(Time.max timestamp)
+                             ~default:timestamp);
                     last_committed_sequence_number := sequence_number;
                     send_result_to_client !data name_of_client)
               else Deferred.unit )
