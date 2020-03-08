@@ -3,12 +3,17 @@ open Async_rpc_kernel
 open Interface
 
 module Request = struct
-  type t = {
-    operation : Operation.t;
-    timestamp : Time.Stable.With_utc_sexp.V2.t;
-    name_of_client : string;
-  }
-  [@@deriving bin_io, fields, sexp, compare]
+  module S = struct
+    type t = {
+      operation : Operation.t;
+      timestamp : Time.Stable.With_utc_sexp.V2.t;
+      name_of_client : string;
+    }
+    [@@deriving bin_io, fields, sexp, compare]
+  end
+
+  include S
+  include Comparable.Make (S)
 end
 
 module Hello = struct

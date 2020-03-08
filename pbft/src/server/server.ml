@@ -112,31 +112,57 @@ module Checkpoint_key_data = struct
   end
 end
 
+module Timer = struct
+  type t = unit Deferred.t Client_to_server_rpcs.Request.Map.t
+
+  let create () = Client_to_server_rpcs.Request.Map.empty
+
+  let update t ~key =
+    Map.update t key ~f:(Option.value ~default:(after Time.Span.second))
+
+  let cancel t ~key = Map.remove t key
+
+  let timeout t = Map.exists t ~f:Deferred.is_determined
+end
+
 module Checkpoint_log = Make_consensus_log (Checkpoint_key_data)
 
 type checkpoint = { last_sequence_number : int; state : Interface.Data.t }
 
 type commit = { operation : Interface.Operation.t; name_of_client : string }
 
-(* Read what client has requested and forwards the message back to client *)
 let main ~me ~host_and_ports () =
+  (* meta data *)
   let sequence_num = ref 0 in
-  let last_committed_sequence_number = ref 0 in
   let current_view = ref 0 in
   let n = List.length host_and_ports in
   let num_of_faulty_nodes = number_of_faulty_nodes ~n in
   let addresses =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
+
+  (* Preprepare data *)
   let preprepare_log = ref (Log.create ()) in
+
+  (* Prepare data *)
   let prepare_log = ref (Log.create ()) in
+
+  (* Commit data *)
   let commit_log = ref (Log.create ()) in
-  let checkpoint_log = ref (Checkpoint_log.create ()) in
   let commit_queue = ref (Queue.create ()) in
+  let client_to_latest_timestamp = ref String.Map.empty in
+  let last_committed_sequence_number = ref 0 in
+  let timer = ref (Timer.create ()) in
+
+  (* Checkpoint data *)
+  let checkpoint_log = ref (Checkpoint_log.create ()) in
   let last_stable_checkpoint =
     ref { last_sequence_number = -1; state = Interface.Data.init () }
   in
-  let client_to_latest_timestamp = ref String.Map.empty in
+
+  (* View change data *)
+  let running = ref true in
+
   let writes =
     let rws =
       List.map addresses ~f:(fun address ->
@@ -149,49 +175,61 @@ let main ~me ~host_and_ports () =
   in
   let is_leader view = view % n = me in
   Pipe.iter request_reader ~f:(fun query ->
+      if Timer.timeout !timer then (
+        running := false;
+        timer := Timer.create () );
       match query with
       | Client query ->
-          if is_leader !current_view then (
-            sequence_num := !sequence_num + 1;
-            let request =
-              Server_preprepare_rpcs.Request.
-                {
-                  leader_number = me;
-                  view = !current_view;
-                  message = query;
-                  sequence_number = !sequence_num;
-                }
-            in
-            List.iter writes ~f:(fun w ->
-                Pipe.write_without_pushback w (fun connection ->
-                    Deferred.return
-                      (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
-                         connection request)));
-            Deferred.unit )
+          if !running then
+            if is_leader !current_view then (
+              sequence_num := !sequence_num + 1;
+              let request =
+                Server_preprepare_rpcs.Request.create ~leader_number:me
+                  ~view:!current_view ~message:query
+                  ~sequence_number:!sequence_num
+              in
+              List.iter writes ~f:(fun w ->
+                  Pipe.write_without_pushback w (fun connection ->
+                      Deferred.return
+                        (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
+                           connection request)));
+              Deferred.unit )
+            else (
+              timer := Timer.update !timer ~key:query;
+              Pipe.write_without_pushback
+                (List.nth_exn writes (!current_view % n))
+                (fun connection ->
+                  Deferred.return
+                    (Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc
+                       connection query));
+              Deferred.unit )
           else Deferred.unit
       | Preprepare { leader_number; view; message; sequence_number } ->
-          let accept =
-            (view = !current_view && leader_number = !current_view % n)
-            && not
-                 (Log.key_exists !preprepare_log ~key:{ view; sequence_number })
-          in
-          if accept then (
-            preprepare_log :=
-              Log.update !preprepare_log ~key:{ view; sequence_number }
-                ~data:message ~replica_number:leader_number;
-            let request =
-              Server_prepare_rpcs.Request.create ~replica_number:me ~view
-                ~message ~sequence_number
+          if !running then
+            let accept =
+              (view = !current_view && leader_number = !current_view % n)
+              && not
+                   (Log.key_exists !preprepare_log
+                      ~key:{ view; sequence_number })
             in
-            List.iter writes ~f:(fun w ->
-                Pipe.write_without_pushback w (fun connection ->
-                    Deferred.return
-                      (Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
-                         request)));
-            Deferred.unit )
+            if accept then (
+              preprepare_log :=
+                Log.update !preprepare_log ~key:{ view; sequence_number }
+                  ~data:message ~replica_number:leader_number;
+              let request =
+                Server_prepare_rpcs.Request.create ~replica_number:me ~view
+                  ~message ~sequence_number
+              in
+              List.iter writes ~f:(fun w ->
+                  Pipe.write_without_pushback w (fun connection ->
+                      Deferred.return
+                        (Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
+                           request)));
+              Deferred.unit )
+            else Deferred.unit
           else Deferred.unit
       | Prepare { replica_number; view; message; sequence_number } ->
-          if view = !current_view then (
+          if !running && view = !current_view then (
             prepare_log :=
               Log.update !prepare_log ~key:{ view; sequence_number }
                 ~data:message ~replica_number;
@@ -220,48 +258,50 @@ let main ~me ~host_and_ports () =
       | Commit
           Server_commit_rpcs.Request.
             { replica_number; view; message; sequence_number } ->
-          let Client_to_server_rpcs.Request.
-                { operation; timestamp; name_of_client } =
-            message
-          in
-          commit_log :=
-            Log.update !commit_log ~key:{ view; sequence_number } ~data:message
-              ~replica_number;
-          let is_latest_timestamp =
-            Map.find !client_to_latest_timestamp name_of_client
-            |> Option.value_map ~default:true ~f:(fun previous_timestamp ->
-                   Time.(previous_timestamp < timestamp))
-          in
-          let can_commit =
-            Log.size !commit_log ~key:{ view; sequence_number } ~data:message
-            = (2 * num_of_faulty_nodes) + 1
-          in
-          let send_result_to_client data name_of_client =
-            let response =
-              Client_to_server_rpcs.Response.create ~result:data ~view
-                ~timestamp ~replica_number:me
+          if !running then (
+            let Client_to_server_rpcs.Request.
+                  { operation; timestamp; name_of_client } =
+              message
             in
-            match
-              Client_connection_manager.write_to_client connection_states
-                ~name_of_client response
-            with
-            | Error _ -> Deferred.unit
-            | Ok _ -> Deferred.unit
-          in
-          if is_latest_timestamp && can_commit then (
-            commit_queue :=
-              Queue.insert !commit_queue ~pos:sequence_number
-                { operation; name_of_client };
-            if !last_committed_sequence_number + 1 = sequence_number then
-              (* execute and send result to client for every sequence_number from now on *)
-              Queue.iter_from !commit_queue ~pos:sequence_number
-                ~f:(fun sequence_number { operation; name_of_client } ->
-                  data := Interface.Operation.apply !data operation;
-                  client_to_latest_timestamp :=
-                    Map.update !client_to_latest_timestamp name_of_client
-                      ~f:(fun _ -> timestamp);
-                  last_committed_sequence_number := sequence_number;
-                  send_result_to_client !data name_of_client)
+            commit_log :=
+              Log.update !commit_log ~key:{ view; sequence_number }
+                ~data:message ~replica_number;
+            let is_latest_timestamp =
+              Map.find !client_to_latest_timestamp name_of_client
+              |> Option.value_map ~default:true ~f:(fun previous_timestamp ->
+                     Time.(previous_timestamp < timestamp))
+            in
+            let can_commit =
+              Log.size !commit_log ~key:{ view; sequence_number } ~data:message
+              = (2 * num_of_faulty_nodes) + 1
+            in
+            let send_result_to_client data name_of_client =
+              let response =
+                Client_to_server_rpcs.Response.create ~result:data ~view
+                  ~timestamp ~replica_number:me
+              in
+              match
+                Client_connection_manager.write_to_client connection_states
+                  ~name_of_client response
+              with
+              | Error _ -> Deferred.unit
+              | Ok _ -> Deferred.unit
+            in
+            if is_latest_timestamp && can_commit then (
+              commit_queue :=
+                Queue.insert !commit_queue ~pos:sequence_number
+                  { operation; name_of_client };
+              if !last_committed_sequence_number + 1 = sequence_number then
+                Queue.iter_from !commit_queue ~pos:sequence_number
+                  ~f:(fun sequence_number { operation; name_of_client } ->
+                    data := Interface.Operation.apply !data operation;
+                    timer := Timer.cancel !timer ~key:message;
+                    client_to_latest_timestamp :=
+                      Map.update !client_to_latest_timestamp name_of_client
+                        ~f:(fun _ -> timestamp);
+                    last_committed_sequence_number := sequence_number;
+                    send_result_to_client !data name_of_client)
+              else Deferred.unit )
             else Deferred.unit )
           else Deferred.unit
       | View_change { view; sequence_number_of_last_checkpoint; replica_number }
