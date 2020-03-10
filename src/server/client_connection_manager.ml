@@ -14,8 +14,8 @@ let write_to_client { data; mux } message ~name_of_client =
   let pipe = Map.find !data name_of_client in
   Mutex.unlock mux;
   match pipe with
-  | None -> Or_error.errorf "No client with name %s" name_of_client
-  | Some pipe -> Or_error.return (Pipe.write_if_open pipe message)
+  | None -> Deferred.unit
+  | Some pipe -> Pipe.write_if_open pipe message
 
 let establish_communication { data; mux } _state query =
   let name_of_client = Client_to_server_rpcs.Hello.name_of_client query in

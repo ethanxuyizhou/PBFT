@@ -10,7 +10,7 @@ val write_to_client :
   t ->
   Client_to_server_rpcs.Response.t ->
   name_of_client:string ->
-  unit Deferred.t Or_error.t
+  unit Deferred.t
 
 val establish_communication :
   t ->

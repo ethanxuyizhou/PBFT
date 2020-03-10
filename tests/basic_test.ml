@@ -13,7 +13,7 @@ let run_server ~ports ~me ~finished =
   let%map process =
     Process.create_exn
       ~prog:
-        "/Users/ethan/Desktop/project/ocaml/_build/default/PBFT/pbft/src/server/server.exe"
+        "/Users/ethan/Desktop/project/ocaml/_build/default/pbft/src/server/server.exe"
       ~args ()
   in
   upon finished (fun _ ->
@@ -37,14 +37,14 @@ let run_client ~name ~server_host_and_ports ~port ~finished =
     Process.create_exn
       ~env:(`Replace [ ("PBFT_TEST_CLIENT_PORT", string_of_int port) ])
       ~prog:
-        "/Users/ethan/Desktop/project/ocaml/_build/default/PBFT/pbft/src/client/client.exe"
+        "/Users/ethan/Desktop/project/ocaml/_build/default/pbft/src/client/client.exe"
       ~args ()
   in
   upon finished (fun _ ->
       Signal.send_i Signal.kill (`Pid (Process.pid process)));
   ()
 
-let setup ~server_ports ~client_port ~r ~finished =
+let setup ~server_ports ~client_port ~finished =
   let%bind () = run_servers ~ports:server_ports ~finished in
   let server_host_and_ports =
     List.map server_ports ~f:(sprintf "localhost:%d")
@@ -56,27 +56,23 @@ let setup ~server_ports ~client_port ~r ~finished =
     Tcp.Where_to_connect.of_host_and_port
       (Host_and_port.of_string (sprintf "localhost:%d" client_port))
   in
-  don't_wait_for (Common.transfer_message_from_pipe_to_address r address)
+  Common.write_to_address address
 
 let%expect_test _ =
   let finished_ivar = ref (Ivar.create ()) in
   let finished = Deferred.create (fun i -> finished_ivar := i) in
   let server_ports = [ 5000; 6000; 7000; 8000 ] in
   let client_port = 3000 in
-  let r, w = Pipe.create () in
-  let%bind () = setup ~server_ports ~client_port ~r ~finished in
+  let%bind w = setup ~server_ports ~client_port ~finished in
   let address =
     Tcp.Where_to_connect.of_host_and_port
       (Host_and_port.of_string (sprintf "localhost:%d" client_port))
   in
   let data_r =
-    let r, w = Pipe.create () in
-    don't_wait_for
-      (Common.ping_for_message_stream w
-         (fun connection ->
-           Rpc.Pipe_rpc.dispatch Rpcs.App_to_client_rpcs.data_rpc connection ())
-         address);
-    r
+    Common.read_from_address
+      (fun connection ->
+        Rpc.Pipe_rpc.dispatch Rpcs.App_to_client_rpcs.data_rpc connection ())
+      address
   in
   let%bind () = after Time.Span.second in
   let%bind () =

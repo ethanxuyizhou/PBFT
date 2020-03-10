@@ -112,6 +112,8 @@ module Checkpoint_key_data = struct
   end
 end
 
+module Checkpoint_log = Make_consensus_log (Checkpoint_key_data)
+
 module Timer = struct
   type t = unit Deferred.t Client_to_server_rpcs.Request.Map.t
 
@@ -125,11 +127,13 @@ module Timer = struct
   let timeout t = Map.exists t ~f:Deferred.is_determined
 end
 
-module Checkpoint_log = Make_consensus_log (Checkpoint_key_data)
+(* Necessary type definitions *)
 
 type checkpoint = { last_sequence_number : int; state : Interface.Data.t }
 
 type commit = { operation : Interface.Operation.t; name_of_client : string }
+
+(* End of necessary type definitions *)
 
 let main ~me ~host_and_ports () =
   (* meta data *)
@@ -164,14 +168,7 @@ let main ~me ~host_and_ports () =
   let running = ref true in
 
   let writes =
-    let rws =
-      List.map addresses ~f:(fun address ->
-          let r, w = Pipe.create () in
-          (address, r, w))
-    in
-    List.iter rws ~f:(fun (address, r, _) ->
-        don't_wait_for (transfer_message_from_pipe_to_address r address));
-    List.map rws ~f:(fun (_, _, w) -> w)
+    List.map addresses ~f:(fun address -> write_to_address address)
   in
   let is_leader view = view % n = me in
   Pipe.iter request_reader ~f:(fun query ->
@@ -194,15 +191,15 @@ let main ~me ~host_and_ports () =
                         (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
                            connection request)));
               Deferred.unit )
-            else (
-              timer := Timer.update !timer ~key:query;
+            else
+              (* timer := Timer.update !timer ~key:query; 
               Pipe.write_without_pushback
                 (List.nth_exn writes (!current_view % n))
                 (fun connection ->
                   Deferred.return
                     (Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc
-                       connection query));
-              Deferred.unit )
+                       connection query)); *)
+              Deferred.unit
           else Deferred.unit
       | Preprepare { leader_number; view; message; sequence_number } ->
           if !running then
@@ -256,11 +253,18 @@ let main ~me ~host_and_ports () =
             else Deferred.unit )
           else Deferred.unit
       | Commit
-          Server_commit_rpcs.Request.
-            { replica_number; view; message; sequence_number } ->
+          {
+            Server_commit_rpcs.Request.replica_number;
+            view;
+            message;
+            sequence_number;
+          } ->
           if !running then (
-            let Client_to_server_rpcs.Request.
-                  { operation; timestamp; name_of_client } =
+            let {
+              Client_to_server_rpcs.Request.operation;
+              timestamp;
+              name_of_client;
+            } =
               message
             in
             commit_log :=
@@ -274,18 +278,6 @@ let main ~me ~host_and_ports () =
             let can_commit =
               Log.size !commit_log ~key:{ view; sequence_number } ~data:message
               = (2 * num_of_faulty_nodes) + 1
-            in
-            let send_result_to_client data name_of_client =
-              let response =
-                Client_to_server_rpcs.Response.create ~result:data ~view
-                  ~timestamp ~replica_number:me
-              in
-              match
-                Client_connection_manager.write_to_client connection_states
-                  ~name_of_client response
-              with
-              | Error _ -> Deferred.unit
-              | Ok _ -> Deferred.unit
             in
             if is_latest_timestamp && can_commit then (
               commit_queue :=
@@ -304,7 +296,12 @@ let main ~me ~host_and_ports () =
                           (Option.value_map ~f:(Time.max timestamp)
                              ~default:timestamp);
                     last_committed_sequence_number := sequence_number;
-                    send_result_to_client !data name_of_client)
+                    let response =
+                      Client_to_server_rpcs.Response.create ~result:!data ~view
+                        ~timestamp ~replica_number:me
+                    in
+                    Client_connection_manager.write_to_client connection_states
+                      ~name_of_client response)
               else Deferred.unit )
             else Deferred.unit )
           else Deferred.unit

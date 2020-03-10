@@ -23,5 +23,5 @@ done
 eval "${client_command} ${host_and_ports}-name 1 &"
 open "${PBFT_BUILD_DIR}/app/index.html"
 
-trap "trap - SIGTERM && kill -- -$$" SIGINT SIGTERM EXIT
+trap "kill -TERM -$$" SIGINT SIGTERM EXIT
 tail -f /dev/null

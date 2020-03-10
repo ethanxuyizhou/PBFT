@@ -4,12 +4,11 @@ include Common_intf
 
 let number_of_faulty_nodes ~n = (n - 1) / 3
 
-let rec transfer_message_from_pipe_to_address ?(timeout = Time.Span.of_sec 0.5)
-    reader address =
+let rec transfer_message_from_pipe_to_address ~timeout reader address =
   match%bind Rpc.Connection.client address with
   | Error _ ->
       let%bind () = after timeout in
-      transfer_message_from_pipe_to_address reader address
+      transfer_message_from_pipe_to_address ~timeout reader address
   | Ok connection ->
       let rec loop () =
         match%bind Pipe.read reader with
@@ -19,13 +18,17 @@ let rec transfer_message_from_pipe_to_address ?(timeout = Time.Span.of_sec 0.5)
             | Error _ ->
                 let%bind () = Rpc.Connection.close connection in
                 let%bind () = after timeout in
-                transfer_message_from_pipe_to_address reader address
+                transfer_message_from_pipe_to_address ~timeout reader address
             | Ok _ -> loop () )
       in
       loop ()
 
-let rec ping_for_message_stream ?(timeout = Time.Span.of_sec 0.5) writer ping
-    address =
+let write_to_address ?(timeout = Time.Span.of_sec 0.5) address =
+  let r, w = Pipe.create () in
+  don't_wait_for (transfer_message_from_pipe_to_address ~timeout r address);
+  w
+
+let rec ping_for_message_stream ~timeout writer ping address =
   match%bind Rpc.Connection.client address with
   | Error _ ->
       let%bind () = after timeout in
@@ -41,6 +44,11 @@ let rec ping_for_message_stream ?(timeout = Time.Span.of_sec 0.5) writer ping
           | Ok (reader, _) ->
               let%bind () = Pipe.transfer_id reader writer in
               ping_for_message_stream ~timeout writer ping address ) )
+
+let read_from_address ?(timeout = Time.Span.of_sec 0.5) ping address =
+  let r, w = Pipe.create () in
+  don't_wait_for (ping_for_message_stream ~timeout w ping address);
+  r
 
 module Queue = struct
   type 'a t = 'a Int.Map.t

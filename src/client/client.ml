@@ -81,15 +81,11 @@ let send_request_to_pbft_servers ~num_of_faulty_nodes addresses request =
 let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
   let pipe =
     List.map addresses ~f:(fun address ->
-        let r, w = Pipe.create () in
-        don't_wait_for
-          (ping_for_message_stream w
-             (fun connection ->
-               Rpc.Pipe_rpc.dispatch Client_to_server_rpcs.response_rpc
-                 connection
-                 Client_to_server_rpcs.Hello.{ name_of_client = name })
-             address);
-        r)
+        read_from_address
+          (fun connection ->
+            Rpc.Pipe_rpc.dispatch Client_to_server_rpcs.response_rpc connection
+              Client_to_server_rpcs.Hello.{ name_of_client = name })
+          address)
     |> Pipe.interleave
   in
   Pipe.iter pipe ~f:(fun response ->
