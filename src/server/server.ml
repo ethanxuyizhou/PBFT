@@ -181,8 +181,9 @@ let main ~me ~host_and_ports () =
                   (Rpc.One_way.dispatch Server_view_change_rpcs.rpc connection
                      {
                        Server_view_change_rpcs.Request.view = !current_view + 1;
-                       sequence_number_of_last_checkpoint;
-                       replica_number;
+                       sequence_number_of_last_checkpoint =
+                         !last_stable_checkpoint.last_sequence_number;
+                       replica_number = me;
                      }))) );
       match query with
       | Client query ->
