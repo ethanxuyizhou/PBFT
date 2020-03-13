@@ -174,7 +174,16 @@ let main ~me ~host_and_ports () =
   Pipe.iter request_reader ~f:(fun query ->
       if Timer.timeout !timer then (
         running := false;
-        timer := Timer.create () );
+        timer := Timer.create ();
+        List.iter writes ~f:(fun w ->
+            Pipe.write_without_pushback w (fun connection ->
+                Deferred.return
+                  (Rpc.One_way.dispatch Server_view_change_rpcs.rpc connection
+                     {
+                       Server_view_change_rpcs.Request.view = !current_view + 1;
+                       sequence_number_of_last_checkpoint;
+                       replica_number;
+                     }))) );
       match query with
       | Client query ->
           if !running then
@@ -191,15 +200,15 @@ let main ~me ~host_and_ports () =
                         (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
                            connection request)));
               Deferred.unit )
-            else
-              (* timer := Timer.update !timer ~key:query; 
+            else (
+              timer := Timer.update !timer ~key:query;
               Pipe.write_without_pushback
                 (List.nth_exn writes (!current_view % n))
                 (fun connection ->
                   Deferred.return
                     (Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc
-                       connection query)); *)
-              Deferred.unit
+                       connection query));
+              Deferred.unit )
           else Deferred.unit
       | Preprepare { leader_number; view; message; sequence_number } ->
           if !running then

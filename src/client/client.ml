@@ -79,6 +79,7 @@ let send_request_to_pbft_servers ~num_of_faulty_nodes addresses request =
   | true -> Deferred.unit
 
 let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
+  let latest_timestamp = ref None in
   let pipe =
     List.map addresses ~f:(fun address ->
         read_from_address
@@ -96,8 +97,13 @@ let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
       let key = timestamp in
       record := Log.update !record ~key ~data ~replica_number;
       let size = Log.size !record ~key ~data in
-      if size = num_of_faulty_nodes + 1 then
-        Pipe.write_if_open server_response_writer data
+      if
+        size = num_of_faulty_nodes + 1
+        && Option.value_map !latest_timestamp ~default:true
+             ~f:(fun latest_timestamp -> latest_timestamp < timestamp)
+      then (
+        latest_timestamp := Some timestamp;
+        Pipe.write_if_open server_response_writer data )
       else Deferred.unit)
 
 (* Kicks off the loop that reads what data needs to be sent to the client,
