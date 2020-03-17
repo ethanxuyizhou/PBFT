@@ -40,17 +40,38 @@ module Queue : sig
   val insert : 'a t -> pos:int -> 'a -> 'a t
 end
 
+module Make_timer (S : Comparable) : sig
+  type t
+
+  val create : unit -> t
+
+  val set : t -> key:S.t -> t
+
+  val cancel : t -> key:S.t -> t
+
+  val timeout : t -> bool
+end
+
 (* Thread-safe log for storing data to achieve PBFT consensus. *)
 module Make_consensus_log (S : Common_intf.Key_data) : sig
   type t
 
   val create : unit -> t
 
-  val update : t -> key:S.Key.t -> data:S.Data.t -> replica_number:int -> t
+  val insert : t -> key:S.Key.t -> data:S.Data.t -> replica_number:int -> t
 
   val size : t -> key:S.Key.t -> data:S.Data.t -> int
 
   val has_reached_consensus : t -> key:S.Key.t -> threshold:int -> bool
 
-  val key_exists : t -> key:S.Key.t -> bool
+  val has_key : t -> key:S.Key.t -> bool
+
+  val number_of_voted_replicas : t -> key:S.Key.t -> int
+
+  val find : t -> key:S.Key.t -> S.Data.t list
+
+  val filter : t -> f:(S.Key.t -> bool) -> t
+
+  val filter_map :
+    t -> f:(key:S.Key.t -> data:S.Data.t -> count:int -> 'a option) -> 'a list
 end

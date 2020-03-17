@@ -8,7 +8,7 @@ module Request = struct
     message : Client_to_server_rpcs.Request.t;
     sequence_number : int;
   }
-  [@@deriving bin_io]
+  [@@deriving bin_io, sexp, compare]
 
   let create ~replica_number ~view ~message ~sequence_number =
     { replica_number; view; message; sequence_number }

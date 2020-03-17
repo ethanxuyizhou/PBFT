@@ -95,7 +95,7 @@ let collect_commits_from_pbft_servers ~num_of_faulty_nodes addresses name =
       let replica_number = Response.replica_number response in
       let data = Response.result response in
       let key = timestamp in
-      record := Log.update !record ~key ~data ~replica_number;
+      record := Log.insert !record ~key ~data ~replica_number;
       let size = Log.size !record ~key ~data in
       if
         size = num_of_faulty_nodes + 1

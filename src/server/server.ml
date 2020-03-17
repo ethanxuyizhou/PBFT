@@ -127,7 +127,10 @@ module View_change_key_data = struct
 
   module Data = struct
     module S = struct
-      type t = { sequence_number_of_last_checkpoint : int }
+      type t = {
+        sequence_number_of_last_checkpoint : int;
+        prepares : Server_view_change_rpcs.Request.prepare_set list;
+      }
       [@@deriving sexp, compare]
     end
 
@@ -137,19 +140,7 @@ module View_change_key_data = struct
 end
 
 module View_change_log = Make_consensus_log (View_change_key_data)
-
-module Timer = struct
-  type t = unit Deferred.t Client_to_server_rpcs.Request.Map.t
-
-  let create () = Client_to_server_rpcs.Request.Map.empty
-
-  let set t ~key =
-    Map.update t key ~f:(Option.value ~default:(after Time.Span.second))
-
-  let cancel t ~key = Map.remove t key
-
-  let timeout t = Map.exists t ~f:Deferred.is_determined
-end
+module Timer = Make_timer (Client_to_server_rpcs.Request)
 
 (* Necessary type definitions *)
 
@@ -203,6 +194,26 @@ let main ~me ~host_and_ports () =
       if Timer.timeout !timer then (
         running := false;
         timer := Timer.create ();
+        let prepares =
+          let last_checkpoint_sequence_number =
+            !last_stable_checkpoint.last_sequence_number
+          in
+          Log.filter_map !prepare_log ~f:(fun ~key ~data:{ message } ~count ->
+              let { Key_data.Key.view; sequence_number } = key in
+              if
+                count >= (2 * num_of_faulty_nodes) + 1
+                && view > last_checkpoint_sequence_number
+                && Log.has_key !preprepare_log ~key
+              then
+                Some
+                  {
+                    Server_view_change_rpcs.Request.preprepare =
+                      Server_preprepare_rpcs.Request.create ~view ~message
+                        ~sequence_number;
+                    prepares = [];
+                  }
+              else None)
+        in
         List.iter writes ~f:(fun w ->
             Pipe.write_without_pushback w (fun connection ->
                 Deferred.return
@@ -212,6 +223,7 @@ let main ~me ~host_and_ports () =
                        sequence_number_of_last_checkpoint =
                          !last_stable_checkpoint.last_sequence_number;
                        replica_number = me;
+                       prepares;
                      }))) );
       match query with
       | Client query ->
@@ -223,12 +235,10 @@ let main ~me ~host_and_ports () =
           then (
             client_log := Set.add !client_log query;
             if is_leader !current_view then (
-              printf "Received at leader\n";
               sequence_num := !sequence_num + 1;
               let request =
-                Server_preprepare_rpcs.Request.create ~leader_number:me
-                  ~view:!current_view ~message:query
-                  ~sequence_number:!sequence_num
+                Server_preprepare_rpcs.Request.create ~view:!current_view
+                  ~message:query ~sequence_number:!sequence_num
               in
               List.iter writes ~f:(fun w ->
                   Pipe.write_without_pushback w (fun connection ->
@@ -238,7 +248,6 @@ let main ~me ~host_and_ports () =
               Deferred.unit )
             else (
               timer := Timer.set !timer ~key:query;
-              printf "Received at follower\n";
               Pipe.write_without_pushback
                 (List.nth_exn writes (!current_view % n))
                 (fun connection ->
@@ -247,18 +256,17 @@ let main ~me ~host_and_ports () =
                        connection query));
               Deferred.unit ) )
           else Deferred.unit
-      | Preprepare { leader_number; view; message; sequence_number } ->
+      | Preprepare { view; message; sequence_number } ->
           if !running then
             let accept =
-              (view = !current_view && leader_number = !current_view % n)
+              view = !current_view
               && not
-                   (Log.key_exists !preprepare_log
-                      ~key:{ view; sequence_number })
+                   (Log.has_key !preprepare_log ~key:{ view; sequence_number })
             in
             if accept then (
               preprepare_log :=
-                Log.update !preprepare_log ~key:{ view; sequence_number }
-                  ~data:{ message } ~replica_number:leader_number;
+                Log.insert !preprepare_log ~key:{ view; sequence_number }
+                  ~data:{ message } ~replica_number:(view % n);
               let request =
                 Server_prepare_rpcs.Request.create ~replica_number:me ~view
                   ~message ~sequence_number
@@ -274,7 +282,7 @@ let main ~me ~host_and_ports () =
       | Prepare { replica_number; view; message; sequence_number } ->
           if !running && view = !current_view then (
             prepare_log :=
-              Log.update !prepare_log ~key:{ view; sequence_number }
+              Log.insert !prepare_log ~key:{ view; sequence_number }
                 ~data:{ message } ~replica_number;
             let request =
               Server_commit_rpcs.Request.create ~replica_number:me ~view
@@ -315,7 +323,7 @@ let main ~me ~host_and_ports () =
               message
             in
             commit_log :=
-              Log.update !commit_log ~key:{ view; sequence_number }
+              Log.insert !commit_log ~key:{ view; sequence_number }
                 ~data:{ message } ~replica_number;
             let is_latest_timestamp =
               Map.find !client_to_latest_timestamp name_of_client
@@ -360,18 +368,27 @@ let main ~me ~host_and_ports () =
               else Deferred.unit )
             else Deferred.unit )
           else Deferred.unit
-      | View_change { view; sequence_number_of_last_checkpoint; replica_number }
+      | View_change
+          { view; sequence_number_of_last_checkpoint; replica_number; prepares }
         ->
           view_change_log :=
-            View_change_log.update !view_change_log ~key:{ view }
-              ~data:{ sequence_number_of_last_checkpoint }
+            View_change_log.insert !view_change_log ~key:{ view }
+              ~data:{ sequence_number_of_last_checkpoint; prepares }
               ~replica_number;
-
-          Deferred.unit
+          if
+            is_leader view
+            && View_change_log.number_of_voted_replicas !view_change_log
+                 ~key:{ view }
+               >= 2 * num_of_faulty_nodes
+          then (
+            let data = View_change_log.find !view_change_log ~key:{ view } in
+            ignore data;
+            Deferred.unit )
+          else Deferred.unit
       | New_view _ -> Deferred.unit
       | Checkpoint { last_sequence_number; state; replica_number } ->
           checkpoint_log :=
-            Checkpoint_log.update !checkpoint_log ~key:{ last_sequence_number }
+            Checkpoint_log.insert !checkpoint_log ~key:{ last_sequence_number }
               ~data:{ state } ~replica_number;
           let is_checkpoint_latest =
             last_sequence_number < !last_stable_checkpoint.last_sequence_number

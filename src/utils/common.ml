@@ -70,11 +70,25 @@ module Queue = struct
   let insert t ~pos data = Map.update t pos ~f:(fun _ -> data)
 end
 
+module Make_timer (Data : Comparable) = struct
+  type t = unit Deferred.t Data.Map.t
+
+  let create () = Data.Map.empty
+
+  let set t ~key =
+    Map.update t key ~f:(Option.value ~default:(after Time.Span.second))
+
+  let cancel t ~key = Map.remove t key
+
+  let timeout t = Map.exists t ~f:Deferred.is_determined
+end
+
 module Make_consensus_log (Key_data : Key_data) = struct
   open Key_data
 
   module Value = struct
     type t = { data_to_votes : int Data.Map.t; voted_replicas : Int.Set.t }
+    [@@deriving fields]
 
     let init ~data ~replica_number =
       {
@@ -82,7 +96,7 @@ module Make_consensus_log (Key_data : Key_data) = struct
         voted_replicas = Int.Set.singleton replica_number;
       }
 
-    let update t ~data ~replica_number =
+    let insert t ~data ~replica_number =
       if Set.exists t.voted_replicas ~f:(Int.equal replica_number) then t
       else
         let data_to_votes =
@@ -95,20 +109,22 @@ module Make_consensus_log (Key_data : Key_data) = struct
     let size t ~data = Option.value (Map.find t.data_to_votes data) ~default:0
 
     let exists t ~f = Map.exists t.data_to_votes ~f
+
+    let filter_mapi t ~f = Map.filter_mapi t.data_to_votes ~f
   end
 
   type t = { record : Value.t Key.Map.t; mux : Mutex.t }
 
   let create () = { record = Key.Map.empty; mux = Mutex.create () }
 
-  let update { record; mux } ~key ~data ~replica_number =
+  let insert { record; mux } ~key ~data ~replica_number =
     Mutex.lock mux;
     let record =
       Map.update record key
         ~f:
           (Option.value_map
              ~default:(Value.init ~data ~replica_number)
-             ~f:(Value.update ~data ~replica_number))
+             ~f:(Value.insert ~data ~replica_number))
     in
     Mutex.unlock mux;
     { record; mux }
@@ -116,13 +132,12 @@ module Make_consensus_log (Key_data : Key_data) = struct
   let size { record; mux } ~key ~data =
     Mutex.lock mux;
     let size =
-      Key.Map.find record key
-      |> Option.value_map ~default:0 ~f:(Value.size ~data)
+      Map.find record key |> Option.value_map ~default:0 ~f:(Value.size ~data)
     in
     Mutex.unlock mux;
     size
 
-  let key_exists { record; mux } ~key =
+  let has_key { record; mux } ~key =
     Mutex.lock mux;
     let exists = Map.find record key |> Option.is_some in
     Mutex.unlock mux;
@@ -131,9 +146,43 @@ module Make_consensus_log (Key_data : Key_data) = struct
   let has_reached_consensus { record; mux } ~key ~threshold =
     Mutex.lock mux;
     let result =
-      Key.Map.find record key
+      Map.find record key
       |> Option.value_map ~default:false
            ~f:(Value.exists ~f:(fun i -> i >= threshold))
+    in
+    Mutex.unlock mux;
+    result
+
+  let number_of_voted_replicas { record; mux } ~key =
+    Mutex.lock mux;
+    let result =
+      Map.find record key
+      |> Option.value_map ~default:0 ~f:(fun value ->
+             Value.voted_replicas value |> Set.length)
+    in
+    Mutex.unlock mux;
+    result
+
+  let find { record; mux } ~key =
+    Mutex.lock mux;
+    Map.find record key
+    |> Option.value_map ~default:[] ~f:(fun value ->
+           Value.data_to_votes value |> Data.Map.keys)
+
+  let filter { record; mux } ~f =
+    Mutex.lock mux;
+    let record = Map.filter_keys record ~f in
+    Mutex.unlock mux;
+    { record; mux = Mutex.create () }
+
+  let filter_map { record; mux } ~f =
+    Mutex.lock mux;
+    let result =
+      Map.mapi record ~f:(fun ~key ~data ->
+          let f = f ~key in
+          Value.filter_mapi data ~f:(fun ~key ~data -> f ~data:key ~count:data)
+          |> Map.data)
+      |> Map.data |> List.concat
     in
     Mutex.unlock mux;
     result
