@@ -87,12 +87,12 @@ module Make_consensus_log (Key_data : Key_data) = struct
   open Key_data
 
   module Value = struct
-    type t = { data_to_votes : int Data.Map.t; voted_replicas : Int.Set.t }
+    type t = { data_to_votes : int list Data.Map.t; voted_replicas : Int.Set.t }
     [@@deriving fields]
 
     let init ~data ~replica_number =
       {
-        data_to_votes = Data.Map.singleton data 1;
+        data_to_votes = Data.Map.singleton data [ replica_number ];
         voted_replicas = Int.Set.singleton replica_number;
       }
 
@@ -101,12 +101,15 @@ module Make_consensus_log (Key_data : Key_data) = struct
       else
         let data_to_votes =
           Data.Map.update t.data_to_votes data
-            ~f:(Option.value_map ~default:1 ~f:(fun x -> x + 1))
+            ~f:
+              (Option.value_map ~default:[ replica_number ] ~f:(fun x ->
+                   replica_number :: x))
         in
         let voted_replicas = Int.Set.add t.voted_replicas replica_number in
         { data_to_votes; voted_replicas }
 
-    let size t ~data = Option.value (Map.find t.data_to_votes data) ~default:0
+    let size t ~data =
+      Option.value_map (Map.find t.data_to_votes data) ~f:List.length ~default:0
 
     let exists t ~f = Map.exists t.data_to_votes ~f
 
@@ -148,7 +151,9 @@ module Make_consensus_log (Key_data : Key_data) = struct
     let result =
       Map.find record key
       |> Option.value_map ~default:false
-           ~f:(Value.exists ~f:(fun i -> i >= threshold))
+           ~f:
+             (Value.exists ~f:(fun voted_replicas ->
+                  List.length voted_replicas >= threshold))
     in
     Mutex.unlock mux;
     result
@@ -180,7 +185,8 @@ module Make_consensus_log (Key_data : Key_data) = struct
     let result =
       Map.mapi record ~f:(fun ~key ~data ->
           let f = f ~key in
-          Value.filter_mapi data ~f:(fun ~key ~data -> f ~data:key ~count:data)
+          Value.filter_mapi data ~f:(fun ~key ~data ->
+              f ~data:key ~voted_replicas:data)
           |> Map.data)
       |> Map.data |> List.concat
     in

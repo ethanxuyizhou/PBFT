@@ -198,10 +198,11 @@ let main ~me ~host_and_ports () =
           let last_checkpoint_sequence_number =
             !last_stable_checkpoint.last_sequence_number
           in
-          Log.filter_map !prepare_log ~f:(fun ~key ~data:{ message } ~count ->
+          Log.filter_map !prepare_log
+            ~f:(fun ~key ~data:{ message } ~voted_replicas ->
               let { Key_data.Key.view; sequence_number } = key in
               if
-                count >= (2 * num_of_faulty_nodes) + 1
+                List.length voted_replicas >= (2 * num_of_faulty_nodes) + 1
                 && view > last_checkpoint_sequence_number
                 && Log.has_key !preprepare_log ~key
               then
@@ -210,7 +211,10 @@ let main ~me ~host_and_ports () =
                     Server_view_change_rpcs.Request.preprepare =
                       Server_preprepare_rpcs.Request.create ~view ~message
                         ~sequence_number;
-                    prepares = [];
+                    prepares =
+                      List.map voted_replicas ~f:(fun replica_number ->
+                          Server_prepare_rpcs.Request.create ~replica_number
+                            ~view ~message ~sequence_number);
                   }
               else None)
         in

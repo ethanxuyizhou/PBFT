@@ -73,5 +73,7 @@ module Make_consensus_log (S : Common_intf.Key_data) : sig
   val filter : t -> f:(S.Key.t -> bool) -> t
 
   val filter_map :
-    t -> f:(key:S.Key.t -> data:S.Data.t -> count:int -> 'a option) -> 'a list
+    t ->
+    f:(key:S.Key.t -> data:S.Data.t -> voted_replicas:int list -> 'a option) ->
+    'a list
 end
