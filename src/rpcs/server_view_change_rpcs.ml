@@ -12,7 +12,7 @@ module Request = struct
     view : int;
     sequence_number_of_last_checkpoint : int;
     replica_number : int;
-    prepares : prepare_set list;
+    prepared_messages_after_last_stable_checkpoint : prepare_set list;
   }
   [@@deriving bin_io]
 end

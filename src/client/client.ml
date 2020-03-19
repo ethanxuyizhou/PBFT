@@ -67,11 +67,11 @@ let send_request_to_pbft_servers ~num_of_faulty_nodes addresses request =
     | Ok connection ->
         let (_ : unit Or_error.t) =
           Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc connection
-            request
+            (Op request)
         in
         Rpc.Connection.close connection
   in
-  let key = Client_to_server_rpcs.Request.timestamp request in
+  let key = Client_to_server_rpcs.Operation.timestamp request in
   match
     Log.has_reached_consensus !record ~key ~threshold:(num_of_faulty_nodes + 1)
   with
@@ -142,7 +142,7 @@ let command =
       don't_wait_for
         (Pipe.iter client_request_reader ~f:(fun operation' ->
              let request =
-               Client_to_server_rpcs.Request.
+               Client_to_server_rpcs.Operation.
                  {
                    operation = operation';
                    timestamp = Time.now ();

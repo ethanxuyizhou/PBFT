@@ -2,7 +2,7 @@ open Core_kernel
 open Async_rpc_kernel
 open Interface
 
-module Request = struct
+module Operation = struct
   module S = struct
     type t = {
       operation : Operation.t;
@@ -10,6 +10,15 @@ module Request = struct
       name_of_client : string;
     }
     [@@deriving bin_io, fields, sexp, compare]
+  end
+
+  include S
+  include Comparable.Make (S)
+end
+
+module Request = struct
+  module S = struct
+    type t = No_op | Op of Operation.t [@@deriving bin_io, sexp, compare]
   end
 
   include S

@@ -14,5 +14,7 @@ end
 module Operation = struct
   type t = Add of int | Multiply of int [@@deriving bin_io, sexp, compare]
 
+  let no_op () = Add 0
+
   let apply data t = match t with Add x -> data + x | Multiply x -> data * x
 end
