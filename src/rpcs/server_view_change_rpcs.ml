@@ -14,7 +14,7 @@ module Request = struct
     replica_number : int;
     prepared_messages_after_last_stable_checkpoint : prepare_set list;
   }
-  [@@deriving bin_io]
+  [@@deriving bin_io, sexp, compare]
 end
 
 let rpc =

@@ -83,12 +83,8 @@ module View_change_key_data = struct
 
   module Data = struct
     module S = struct
-      type t = {
-        sequence_number_of_last_checkpoint : int;
-        prepared_messages_after_last_stable_checkpoint :
-          Server_view_change_rpcs.Request.prepare_set list;
-      }
-      [@@deriving sexp, compare]
+      type t = Server_view_change_rpcs.Request.t
+      [@@deriving bin_io, sexp, compare]
     end
 
     include S

@@ -311,12 +311,12 @@ let main ~me ~host_and_ports () =
                 else Deferred.unit )
           else Deferred.unit
       | View_change
-          {
-            view;
-            sequence_number_of_last_checkpoint;
-            replica_number;
-            prepared_messages_after_last_stable_checkpoint;
-          } ->
+          ( {
+              view;
+              sequence_number_of_last_checkpoint = _;
+              replica_number;
+              prepared_messages_after_last_stable_checkpoint = _;
+            } as view_change ) ->
           (* TODO verify view change message 
              Things to check:
              1. Digest is correct
@@ -324,12 +324,7 @@ let main ~me ~host_and_ports () =
            *)
           view_change_log :=
             View_change_log.insert !view_change_log ~key:{ view }
-              ~data:
-                {
-                  sequence_number_of_last_checkpoint;
-                  prepared_messages_after_last_stable_checkpoint;
-                }
-              ~replica_number;
+              ~data:view_change ~replica_number;
           if
             is_leader view
             && View_change_log.number_of_voted_replicas !view_change_log
@@ -340,22 +335,13 @@ let main ~me ~host_and_ports () =
             let data = View_change_log.find !view_change_log ~key:{ view } in
 
             let min_s =
-              List.map data
-                ~f:(fun {
-                          sequence_number_of_last_checkpoint;
-                          prepared_messages_after_last_stable_checkpoint = _;
-                        }
-                        -> sequence_number_of_last_checkpoint)
+              List.map data ~f:(fun x -> x.sequence_number_of_last_checkpoint)
               |> List.max_elt ~compare:Int.compare
             in
 
             let preprepares =
-              List.map data
-                ~f:(fun {
-                          sequence_number_of_last_checkpoint = _;
-                          prepared_messages_after_last_stable_checkpoint;
-                        }
-                        -> prepared_messages_after_last_stable_checkpoint)
+              List.map data ~f:(fun x ->
+                  x.prepared_messages_after_last_stable_checkpoint)
               |> List.concat
               |> List.map ~f:(fun preprepare_set -> preprepare_set.preprepare)
             in
@@ -366,9 +352,9 @@ let main ~me ~host_and_ports () =
             in
             Option.value_map min_s ~default:() ~f:(fun min_s ->
                 Option.value_map max_s ~default:() ~f:(fun max_s ->
-                    let () =
+                    let preprepares =
                       List.range ~start:`exclusive ~stop:`inclusive min_s max_s
-                      |> List.iter ~f:(fun sequence_number ->
+                      |> List.map ~f:(fun sequence_number ->
                              let message =
                                List.find_map preprepares ~f:(fun preprepare ->
                                    if
@@ -380,22 +366,25 @@ let main ~me ~host_and_ports () =
                                     ~default:
                                       Client_to_server_rpcs.Request.(No_op)
                              in
-                             let preprepare_message =
-                               Server_preprepare_rpcs.Request.create ~view
-                                 ~message ~sequence_number
-                             in
-                             List.iter writes ~f:(fun w ->
-                                 Pipe.write_without_pushback w
-                                   (fun connection ->
-                                     Deferred.return
-                                       (Rpc.One_way.dispatch
-                                          Server_preprepare_rpcs.rpc connection
-                                          preprepare_message))))
+                             Server_preprepare_rpcs.Request.create ~view
+                               ~message ~sequence_number)
                     in
-                    ()));
+                    let view_change_messages =
+                      View_change_log.find !view_change_log ~key:{ view }
+                    in
+                    let request =
+                      Server_new_view_rpcs.Request.
+                        { view; view_change_messages; preprepares }
+                    in
+                    List.iter writes ~f:(fun w ->
+                        Pipe.write_without_pushback w (fun connection ->
+                            Deferred.return
+                              (Rpc.One_way.dispatch Server_new_view_rpcs.rpc
+                                 connection request)))));
             Deferred.unit )
           else Deferred.unit
-      | New_view _ -> Deferred.unit
+      | New_view { view = _; view_change_messages = _; preprepares = _ } ->
+          Deferred.unit
       | Checkpoint { last_sequence_number; state; replica_number } ->
           checkpoint_log :=
             Checkpoint_log.insert !checkpoint_log ~key:{ last_sequence_number }
