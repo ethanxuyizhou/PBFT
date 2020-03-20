@@ -119,6 +119,7 @@ let main ~me ~host_and_ports () =
   in
   let is_leader view = view % n = me in
   Pipe.iter request_reader ~f:(fun query ->
+      printf "Sequence number for %d is %d\n" me !sequence_num;
       if Timer.timeout !timer then (
         running := false;
         timer := Timer.create ();
@@ -195,6 +196,9 @@ let main ~me ~host_and_ports () =
                   Deferred.unit ) )
               else Deferred.unit )
       | Preprepare { view; message; sequence_number } ->
+          printf
+            "Preprepare: %d. Current view: %d. Me: %d. Sequence_number: %d\n"
+            view !current_view me sequence_number;
           if !running then
             let accept =
               view = !current_view
@@ -203,6 +207,7 @@ let main ~me ~host_and_ports () =
                       ~key:{ view; sequence_number })
             in
             if accept then (
+              printf "Accepted preprepare\n";
               preprepare_log :=
                 Preprepare_log.insert !preprepare_log
                   ~key:{ view; sequence_number } ~data:{ message }
@@ -277,7 +282,6 @@ let main ~me ~host_and_ports () =
                     ~data:{ message }
                   = (2 * num_of_faulty_nodes) + 1
                 in
-
                 if is_latest_timestamp && can_commit then (
                   commit_queue :=
                     Queue.insert !commit_queue ~pos:sequence_number message;
@@ -317,6 +321,7 @@ let main ~me ~host_and_ports () =
               replica_number;
               prepared_messages_after_last_stable_checkpoint = _;
             } as view_change ) ->
+          printf "View change\n";
           (* TODO verify view change message 
              Things to check:
              1. Digest is correct
@@ -338,7 +343,6 @@ let main ~me ~host_and_ports () =
               List.map data ~f:(fun x -> x.sequence_number_of_last_checkpoint)
               |> List.max_elt ~compare:Int.compare
             in
-
             let preprepares =
               List.map data ~f:(fun x ->
                   x.prepared_messages_after_last_stable_checkpoint)
@@ -350,40 +354,53 @@ let main ~me ~host_and_ports () =
                   preprepare.sequence_number)
               |> List.max_elt ~compare:Int.compare
             in
-            Option.value_map min_s ~default:() ~f:(fun min_s ->
-                Option.value_map max_s ~default:() ~f:(fun max_s ->
-                    let preprepares =
-                      List.range ~start:`exclusive ~stop:`inclusive min_s max_s
-                      |> List.map ~f:(fun sequence_number ->
-                             let message =
-                               List.find_map preprepares ~f:(fun preprepare ->
-                                   if
-                                     preprepare.sequence_number
-                                     = sequence_number
-                                   then Some preprepare.message
-                                   else None)
-                               |> Option.value
-                                    ~default:
-                                      Client_to_server_rpcs.Request.(No_op)
-                             in
-                             Server_preprepare_rpcs.Request.create ~view
-                               ~message ~sequence_number)
-                    in
-                    let view_change_messages =
-                      View_change_log.find !view_change_log ~key:{ view }
-                    in
-                    let request =
-                      Server_new_view_rpcs.Request.
-                        { view; view_change_messages; preprepares }
-                    in
-                    List.iter writes ~f:(fun w ->
-                        Pipe.write_without_pushback w (fun connection ->
-                            Deferred.return
-                              (Rpc.One_way.dispatch Server_new_view_rpcs.rpc
-                                 connection request)))));
+            (sequence_num :=
+               match (min_s, max_s) with
+               | None, None -> !sequence_num
+               | Some min_s, None -> min_s
+               | _, Some max_s -> max_s);
+            let view_change_messages =
+              View_change_log.find !view_change_log ~key:{ view }
+            in
+            let request =
+              Option.value_map max_s
+                ~default:
+                  Server_new_view_rpcs.Request.
+                    { view; view_change_messages; preprepares = [] }
+                ~f:(fun max_s ->
+                  let min_s = Option.value min_s ~default:0 in
+
+                  let preprepares =
+                    List.range ~start:`exclusive ~stop:`inclusive min_s max_s
+                    |> List.map ~f:(fun sequence_number ->
+                           let message =
+                             List.find_map preprepares ~f:(fun preprepare ->
+                                 if preprepare.sequence_number = sequence_number
+                                 then Some preprepare.message
+                                 else None)
+                             |> Option.value
+                                  ~default:Client_to_server_rpcs.Request.(No_op)
+                           in
+                           Server_preprepare_rpcs.Request.create ~view ~message
+                             ~sequence_number)
+                  in
+                  Server_new_view_rpcs.Request.
+                    { view; view_change_messages; preprepares })
+            in
+            List.iter writes ~f:(fun w ->
+                Pipe.write_without_pushback w (fun connection ->
+                    Deferred.return
+                      (Rpc.One_way.dispatch Server_new_view_rpcs.rpc connection
+                         request)));
+            running := true;
             Deferred.unit )
           else Deferred.unit
-      | New_view { view = _; view_change_messages = _; preprepares = _ } ->
+      | New_view { view; view_change_messages = _; preprepares } ->
+          (* TODO: authenticate the view change messages and the preprepare messages *)
+          running := true;
+          current_view := view;
+          List.iter preprepares ~f:(fun preprepare ->
+              Pipe.write_without_pushback request_writer (Preprepare preprepare));
           Deferred.unit
       | Checkpoint { last_sequence_number; state; replica_number } ->
           checkpoint_log :=

@@ -170,9 +170,13 @@ module Make_consensus_log (Key_data : Key_data) = struct
 
   let find { record; mux } ~key =
     Mutex.lock mux;
-    Map.find record key
-    |> Option.value_map ~default:[] ~f:(fun value ->
-           Value.data_to_votes value |> Data.Map.keys)
+    let result =
+      Map.find record key
+      |> Option.value_map ~default:[] ~f:(fun value ->
+             Value.data_to_votes value |> Data.Map.keys)
+    in
+    Mutex.unlock mux;
+    result
 
   let filter { record; mux } ~f =
     Mutex.lock mux;

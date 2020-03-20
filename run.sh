@@ -6,13 +6,20 @@ server_command="${PBFT_BUILD_DIR}/server/server.exe"
 
 host_and_ports=""
 count=$1
+active=$2
+if (($count < $active)) 
+then
+  echo "Cannot have more active servers than total number of servers"
+  exit 1
+fi
+
 ports=($(shuf -i 4000-5000 -n $1))
 for port in ${ports[@]}
 do
   host_and_ports+="-host-and-port localhost:$port "
 done
 
-me=0
+me=1
 
 while (( $me < $count ))
 do
