@@ -71,16 +71,32 @@ module Queue = struct
 end
 
 module Make_timer (Data : Comparable) = struct
-  type t = unit Deferred.t Data.Map.t
+  type t = { data : unit Deferred.t Data.Map.t ref; mux : Mutex.t }
 
-  let create () = Data.Map.empty
+  let create () = { data = ref Data.Map.empty; mux = Mutex.create () }
 
-  let set t ~key =
-    Map.update t key ~f:(Option.value ~default:(after Time.Span.second))
+  let set { data; mux } ~key ~f =
+    Mutex.lock mux;
+    data :=
+      Map.update !data key
+        ~f:
+          (Option.value
+             ~default:
+               (let%map () = after Time.Span.second in
+                Mutex.lock mux;
+                if Map.mem !data key then f ();
+                Mutex.unlock mux));
+    Mutex.unlock mux
 
-  let cancel t ~key = Map.remove t key
+  let cancel { data; mux } ~key =
+    Mutex.lock mux;
+    data := Map.remove !data key;
+    Mutex.unlock mux
 
-  let timeout t = Map.exists t ~f:Deferred.is_determined
+  let reset { data; mux } =
+    Mutex.lock mux;
+    data := Data.Map.empty;
+    Mutex.unlock mux
 end
 
 module Make_consensus_log (Key_data : Key_data) = struct

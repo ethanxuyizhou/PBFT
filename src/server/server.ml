@@ -4,7 +4,7 @@ open Rpcs
 open Common
 open Logs
 
-type request =
+type event =
   | Client of Client_to_server_rpcs.Request.t
   | Preprepare of Server_preprepare_rpcs.Request.t
   | Prepare of Server_prepare_rpcs.Request.t
@@ -12,12 +12,13 @@ type request =
   | View_change of Server_view_change_rpcs.Request.t
   | New_view of Server_new_view_rpcs.Request.t
   | Checkpoint of Server_checkpoint_rpcs.Request.t
+  | Timeout
 
 (* Global data structure *)
 
 let data = ref (Interface.Data.init ())
 
-let request_reader, request_writer = Pipe.create ()
+let event_reader, event_writer = Pipe.create ()
 
 let connection_states = Client_connection_manager.create ()
 
@@ -25,7 +26,7 @@ let connection_states = Client_connection_manager.create ()
 
 let client_request_implementation =
   Rpc.One_way.implement Client_to_server_rpcs.request_rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (Client query)))
+      don't_wait_for (Pipe.write event_writer (Client query)))
 
 let client_response_implementation =
   Rpc.Pipe_rpc.implement Client_to_server_rpcs.response_rpc
@@ -33,27 +34,27 @@ let client_response_implementation =
 
 let preprepare_implementation =
   Rpc.One_way.implement Server_preprepare_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (Preprepare query)))
+      don't_wait_for (Pipe.write event_writer (Preprepare query)))
 
 let prepare_implementation =
   Rpc.One_way.implement Server_prepare_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (Prepare query)))
+      don't_wait_for (Pipe.write event_writer (Prepare query)))
 
 let commit_implementation =
   Rpc.One_way.implement Server_commit_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (Commit query)))
+      don't_wait_for (Pipe.write event_writer (Commit query)))
 
 let view_change_implementation =
   Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (View_change query)))
+      don't_wait_for (Pipe.write event_writer (View_change query)))
 
 let new_view_implementation =
   Rpc.One_way.implement Server_new_view_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (New_view query)))
+      don't_wait_for (Pipe.write event_writer (New_view query)))
 
 let checkpoint_implementation =
   Rpc.One_way.implement Server_checkpoint_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write request_writer (Checkpoint query)))
+      don't_wait_for (Pipe.write event_writer (Checkpoint query)))
 
 let implementations =
   let implementations =
@@ -107,61 +108,63 @@ let main ~me ~host_and_ports () =
   (* Checkpoint data *)
   let checkpoint_log = ref (Checkpoint_log.create ()) in
   let last_stable_checkpoint =
-    ref { last_sequence_number = -1; state = Interface.Data.init () }
+    ref { last_sequence_number = 0; state = Interface.Data.init () }
   in
 
   (* View change data *)
   let running = ref true in
   let view_change_log = ref (View_change_log.create ()) in
 
-  let writes =
+  let clients =
     List.map addresses ~f:(fun address -> write_to_address address)
   in
   let is_leader view = view % n = me in
-  Pipe.iter request_reader ~f:(fun query ->
-      printf "Sequence number for %d is %d\n" me !sequence_num;
-      if Timer.timeout !timer then (
-        running := false;
-        timer := Timer.create ();
-        let prepared_messages_after_last_stable_checkpoint =
-          let last_checkpoint_sequence_number =
-            !last_stable_checkpoint.last_sequence_number
-          in
-          Preprepare_log.filter_map !prepare_log
-            ~f:(fun ~key ~data:{ message } ~voted_replicas ->
-              let { Key_data.Key.view; sequence_number } = key in
-              if
-                List.length voted_replicas >= (2 * num_of_faulty_nodes) + 1
-                && view > last_checkpoint_sequence_number
-                && Preprepare_log.has_key !preprepare_log ~key
-              then
-                Some
-                  Server_view_change_rpcs.Request.
-                    {
-                      preprepare =
-                        Server_preprepare_rpcs.Request.create ~view ~message
-                          ~sequence_number;
-                      prepares =
-                        List.map voted_replicas ~f:(fun replica_number ->
-                            Server_prepare_rpcs.Request.create ~replica_number
-                              ~view ~message ~sequence_number);
-                    }
-              else None)
-        in
-        List.iteri writes ~f:(fun i w ->
-            if not (Int.equal i me) then
-              Pipe.write_without_pushback w (fun connection ->
-                  Deferred.return
-                    (Rpc.One_way.dispatch Server_view_change_rpcs.rpc connection
-                       {
-                         Server_view_change_rpcs.Request.view =
-                           !current_view + 1;
-                         sequence_number_of_last_checkpoint =
-                           !last_stable_checkpoint.last_sequence_number;
-                         replica_number = me;
-                         prepared_messages_after_last_stable_checkpoint;
-                       }))) );
+
+  Pipe.iter event_reader ~f:(fun query ->
       match query with
+      | Timeout ->
+          running := false;
+          Timer.reset !timer;
+          let prepared_messages_after_last_stable_checkpoint =
+            let last_checkpoint_sequence_number =
+              !last_stable_checkpoint.last_sequence_number
+            in
+            Preprepare_log.filter_map !prepare_log
+              ~f:(fun ~key ~data:{ message } ~voted_replicas ->
+                let { Key_data.Key.view; sequence_number } = key in
+                if
+                  List.length voted_replicas >= (2 * num_of_faulty_nodes) + 1
+                  && view > last_checkpoint_sequence_number
+                  && Preprepare_log.has_key !preprepare_log ~key
+                then
+                  Some
+                    Server_view_change_rpcs.Request.
+                      {
+                        preprepare =
+                          Server_preprepare_rpcs.Request.create ~view ~message
+                            ~sequence_number;
+                        prepares =
+                          List.map voted_replicas ~f:(fun replica_number ->
+                              Server_prepare_rpcs.Request.create ~replica_number
+                                ~view ~message ~sequence_number);
+                      }
+                else None)
+          in
+          List.iteri clients ~f:(fun i client ->
+              if not (Int.equal i me) then
+                Pipe.write_without_pushback client (fun connection ->
+                    Deferred.return
+                      (Rpc.One_way.dispatch Server_view_change_rpcs.rpc
+                         connection
+                         {
+                           Server_view_change_rpcs.Request.view =
+                             !current_view + 1;
+                           sequence_number_of_last_checkpoint =
+                             !last_stable_checkpoint.last_sequence_number;
+                           replica_number = me;
+                           prepared_messages_after_last_stable_checkpoint;
+                         })));
+          Deferred.unit
       | Client query -> (
           match query with
           | No_op -> Deferred.unit
@@ -179,16 +182,17 @@ let main ~me ~host_and_ports () =
                     Server_preprepare_rpcs.Request.create ~view:!current_view
                       ~message:(Op query) ~sequence_number:!sequence_num
                   in
-                  List.iter writes ~f:(fun w ->
-                      Pipe.write_without_pushback w (fun connection ->
+                  List.iter clients ~f:(fun client ->
+                      Pipe.write_without_pushback client (fun connection ->
                           Deferred.return
                             (Rpc.One_way.dispatch Server_preprepare_rpcs.rpc
                                connection request)));
                   Deferred.unit )
                 else (
-                  timer := Timer.set !timer ~key:query;
+                  Timer.set !timer ~key:query ~f:(fun () ->
+                      Pipe.write_without_pushback event_writer Timeout);
                   Pipe.write_without_pushback
-                    (List.nth_exn writes (!current_view % n))
+                    (List.nth_exn clients (!current_view % n))
                     (fun connection ->
                       Deferred.return
                         (Rpc.One_way.dispatch Client_to_server_rpcs.request_rpc
@@ -216,8 +220,8 @@ let main ~me ~host_and_ports () =
                 Server_prepare_rpcs.Request.create ~replica_number:me ~view
                   ~message ~sequence_number
               in
-              List.iter writes ~f:(fun w ->
-                  Pipe.write_without_pushback w (fun connection ->
+              List.iter clients ~f:(fun client ->
+                  Pipe.write_without_pushback client (fun connection ->
                       Deferred.return
                         (Rpc.One_way.dispatch Server_prepare_rpcs.rpc connection
                            request)));
@@ -244,8 +248,8 @@ let main ~me ~host_and_ports () =
               = (2 * num_of_faulty_nodes) + 1
             in
             if is_in_preprepare_log && can_prepare then (
-              List.iter writes ~f:(fun w ->
-                  Pipe.write_without_pushback w (fun connection ->
+              List.iter clients ~f:(fun client ->
+                  Pipe.write_without_pushback client (fun connection ->
                       Deferred.return
                         (Rpc.One_way.dispatch Server_commit_rpcs.rpc connection
                            request)));
@@ -304,7 +308,7 @@ let main ~me ~host_and_ports () =
                               (Option.value_map ~f:(Time.max timestamp)
                                  ~default:timestamp);
                         last_committed_sequence_number := sequence_number;
-                        timer := Timer.cancel !timer ~key:message;
+                        Timer.cancel !timer ~key:message;
                         let response =
                           Client_to_server_rpcs.Response.create ~result:!data
                             ~view ~timestamp ~replica_number:me
@@ -387,8 +391,8 @@ let main ~me ~host_and_ports () =
                   Server_new_view_rpcs.Request.
                     { view; view_change_messages; preprepares })
             in
-            List.iter writes ~f:(fun w ->
-                Pipe.write_without_pushback w (fun connection ->
+            List.iter clients ~f:(fun client ->
+                Pipe.write_without_pushback client (fun connection ->
                     Deferred.return
                       (Rpc.One_way.dispatch Server_new_view_rpcs.rpc connection
                          request)));
@@ -397,10 +401,11 @@ let main ~me ~host_and_ports () =
           else Deferred.unit
       | New_view { view; view_change_messages = _; preprepares } ->
           (* TODO: authenticate the view change messages and the preprepare messages *)
+          printf "new view\n";
           running := true;
           current_view := view;
           List.iter preprepares ~f:(fun preprepare ->
-              Pipe.write_without_pushback request_writer (Preprepare preprepare));
+              Pipe.write_without_pushback event_writer (Preprepare preprepare));
           Deferred.unit
       | Checkpoint { last_sequence_number; state; replica_number } ->
           checkpoint_log :=

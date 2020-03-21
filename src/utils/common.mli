@@ -45,11 +45,11 @@ module Make_timer (S : Comparable) : sig
 
   val create : unit -> t
 
-  val set : t -> key:S.t -> t
+  val set : t -> key:S.t -> f:(unit -> unit) -> unit
 
-  val cancel : t -> key:S.t -> t
+  val cancel : t -> key:S.t -> unit
 
-  val timeout : t -> bool
+  val reset : t -> unit
 end
 
 (* Thread-safe log for storing data to achieve PBFT consensus. *)
