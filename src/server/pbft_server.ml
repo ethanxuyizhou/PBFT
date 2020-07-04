@@ -4,7 +4,7 @@ open Rpcs
 open Common
 open Logs
 
-type event =
+ type event =
   | Client of Client_to_server_rpcs.Request.t
   | Preprepare of Server_preprepare_rpcs.Request.t
   | Prepare of Server_prepare_rpcs.Request.t
@@ -14,47 +14,54 @@ type event =
   | Checkpoint of Server_checkpoint_rpcs.Request.t
   | Timeout
 
-(* Global data structure *)
+type t = {
+  mutable data : Interface.Data.t;
+  event_reader : event Pipe.Reader.t;
+  event_writer : event Pipe.Writer.t;
+  connection_manager : Client_connection_manager.t;
+}
 
-let data = ref (Interface.Data.init ())
-
-let event_reader, event_writer = Pipe.create ()
-
-let connection_states = Client_connection_manager.create ()
-
-(* End of global data structre *)
+let create () =
+  let event_reader, event_writer = Pipe.create () in
+  {
+    data = Interface.Data.init ();
+    event_reader;
+    event_writer;
+    connection_manager = Client_connection_manager.create ();
+  }
 
 let client_request_implementation =
-  Rpc.One_way.implement Client_to_server_rpcs.request_rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (Client query)))
+  Rpc.One_way.implement Client_to_server_rpcs.request_rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (Client query)))
 
 let client_response_implementation =
-  Rpc.Pipe_rpc.implement Client_to_server_rpcs.response_rpc
-    (Client_connection_manager.establish_communication connection_states)
+  Rpc.Pipe_rpc.implement Client_to_server_rpcs.response_rpc (fun t reader ->
+      Client_connection_manager.establish_communication t.connection_manager
+        reader)
 
 let preprepare_implementation =
-  Rpc.One_way.implement Server_preprepare_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (Preprepare query)))
+  Rpc.One_way.implement Server_preprepare_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (Preprepare query)))
 
 let prepare_implementation =
-  Rpc.One_way.implement Server_prepare_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (Prepare query)))
+  Rpc.One_way.implement Server_prepare_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (Prepare query)))
 
 let commit_implementation =
-  Rpc.One_way.implement Server_commit_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (Commit query)))
+  Rpc.One_way.implement Server_commit_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (Commit query)))
 
 let view_change_implementation =
-  Rpc.One_way.implement Server_view_change_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (View_change query)))
+  Rpc.One_way.implement Server_view_change_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (View_change query)))
 
 let new_view_implementation =
-  Rpc.One_way.implement Server_new_view_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (New_view query)))
+  Rpc.One_way.implement Server_new_view_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (New_view query)))
 
 let checkpoint_implementation =
-  Rpc.One_way.implement Server_checkpoint_rpcs.rpc (fun _state query ->
-      don't_wait_for (Pipe.write event_writer (Checkpoint query)))
+  Rpc.One_way.implement Server_checkpoint_rpcs.rpc (fun t query ->
+      don't_wait_for (Pipe.write t.event_writer (Checkpoint query)))
 
 let implementations =
   let implementations =
@@ -79,48 +86,17 @@ type checkpoint = { last_sequence_number : int; state : Interface.Data.t }
 
 (* End of necessary type definitions *)
 
-let main ~me ~host_and_ports () =
-  (* meta data *)
-  let sequence_num = ref 0 in
-  let current_view = ref 0 in
+let main t ~me ~host_and_ports () =
   let n = List.length host_and_ports in
   let num_of_faulty_nodes = number_of_faulty_nodes ~n in
   let addresses =
     List.map host_and_ports ~f:Tcp.Where_to_connect.of_host_and_port
   in
-
-  (* Client_to_server data *)
-  let client_log = ref Client_to_server_rpcs.Operation.Set.empty in
-
-  (* Preprepare data *)
-  let preprepare_log = ref (Preprepare_log.create ()) in
-
-  (* Prepare data *)
-  let prepare_log = ref (Prepare_log.create ()) in
-
-  (* Commit data *)
-  let commit_log = ref (Commit_log.create ()) in
-  let commit_queue = ref (Queue.create ()) in
-  let client_to_latest_timestamp = ref String.Map.empty in
-  let last_committed_sequence_number = ref 0 in
-  let timer = ref (Timer.create ()) in
-
-  (* Checkpoint data *)
-  let checkpoint_log = ref (Checkpoint_log.create ()) in
-  let last_stable_checkpoint =
-    ref { last_sequence_number = 0; state = Interface.Data.init () }
-  in
-
-  (* View change data *)
-  let running = ref true in
-  let view_change_log = ref (View_change_log.create ()) in
-
   let clients =
     List.map addresses ~f:(fun address -> write_to_address address)
   in
   let is_leader view = view % n = me in
-
-  Pipe.iter event_reader ~f:(fun query ->
+  Pipe.iter t.event_reader ~f:(fun query ->
       match query with
       | Timeout ->
           running := false;
@@ -190,7 +166,7 @@ let main ~me ~host_and_ports () =
                   Deferred.unit )
                 else (
                   Timer.set !timer ~key:query ~f:(fun () ->
-                      Pipe.write_without_pushback event_writer Timeout);
+                      Pipe.write_without_pushback t.event_writer Timeout);
                   Pipe.write_without_pushback
                     (List.nth_exn clients (!current_view % n))
                     (fun connection ->
@@ -211,7 +187,6 @@ let main ~me ~host_and_ports () =
                       ~key:{ view; sequence_number })
             in
             if accept then (
-              printf "Accepted preprepare\n";
               preprepare_log :=
                 Preprepare_log.insert !preprepare_log
                   ~key:{ view; sequence_number } ~data:{ message }
@@ -299,7 +274,7 @@ let main ~me ~host_and_ports () =
                                 } as message )
                               ->
                         client_log := Set.add !client_log message;
-                        data := Interface.Operation.apply !data operation;
+                        t.data <- Interface.Operation.apply t.data operation;
                         client_to_latest_timestamp :=
                           Map.update
                             !client_to_latest_timestamp
@@ -310,11 +285,11 @@ let main ~me ~host_and_ports () =
                         last_committed_sequence_number := sequence_number;
                         Timer.cancel !timer ~key:message;
                         let response =
-                          Client_to_server_rpcs.Response.create ~result:!data
+                          Client_to_server_rpcs.Response.create ~result:t.data
                             ~view ~timestamp ~replica_number:me
                         in
                         Client_connection_manager.write_to_client
-                          connection_states ~name_of_client response)
+                          t.connection_manager ~name_of_client response)
                   else Deferred.unit )
                 else Deferred.unit )
           else Deferred.unit
@@ -327,10 +302,10 @@ let main ~me ~host_and_ports () =
             } as view_change ) ->
           printf "View change\n";
           (* TODO verify view change message 
-             Things to check:
-             1. Digest is correct
-             2. Prepared messages have higher sequence number than seq number of last stable checkpoint
-           *)
+           Things to check:
+           1. Digest is correct
+           2. Prepared messages have higher sequence number than seq number of last stable checkpoint
+        *)
           view_change_log :=
             View_change_log.insert !view_change_log ~key:{ view }
               ~data:view_change ~replica_number;
@@ -405,7 +380,7 @@ let main ~me ~host_and_ports () =
           running := true;
           current_view := view;
           List.iter preprepares ~f:(fun preprepare ->
-              Pipe.write_without_pushback event_writer (Preprepare preprepare));
+              Pipe.write_without_pushback t.event_writer (Preprepare preprepare));
           Deferred.unit
       | Checkpoint { last_sequence_number; state; replica_number } ->
           checkpoint_log :=
@@ -421,6 +396,7 @@ let main ~me ~host_and_ports () =
           in
           if is_checkpoint_latest && can_checkpoint then (
             last_stable_checkpoint := { last_sequence_number; state };
+            (* TODO discard all preprepare, prepare, commit messages with earlier checkpoints *)
             Deferred.unit )
           else Deferred.unit)
 
@@ -444,9 +420,10 @@ let command =
         Tcp.Server.create ~on_handler_error:`Ignore
           (Tcp.Where_to_listen.of_port port) (fun _ r w ->
             Rpc.Connection.server_with_close r w ~implementations
-              ~on_handshake_error:`Ignore ~connection_state:Fn.id)
+              ~on_handshake_error:`Ignore
+              ~connection_state:(fun (_ : Rpc.Connection.t) ->
+                let t = create () in
+                don't_wait_for (main t ~me ~host_and_ports ());
+                t))
       in
-      don't_wait_for (main ~me ~host_and_ports ());
       Deferred.never ())
-
-let () = Command.run command

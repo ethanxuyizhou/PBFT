@@ -1,0 +1,5 @@
+(library
+ (name pbft_state)
+ (libraries core async rpcs common)
+ (preprocess (pps ppx_jane))
+)

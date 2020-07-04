@@ -14,6 +14,5 @@ val write_to_client :
 
 val establish_communication :
   t ->
-  'connection_state ->
   Client_to_server_rpcs.Hello.t ->
   (Client_to_server_rpcs.Response.t Pipe.Reader.t, Error.t) Result.t Deferred.t

@@ -8,8 +8,7 @@ let client_request_reader, client_request_writer = Pipe.create ()
 
 let server_response_reader, server_response_writer = Pipe.create ()
 
-let browser_tab_writer_list, browser_tab_writer_mux =
-  (ref Int.Map.empty, Mutex.create ())
+let browser_tab_writer_list = ref Int.Map.empty
 
 module Key_data = struct
   module Key = struct
@@ -44,15 +43,11 @@ let operation_implementation =
 let data_implementation =
   Rpc.Pipe_rpc.implement App_to_client_rpcs.data_rpc (fun _state _query ->
       let r, w = Pipe.create () in
-      Mutex.lock browser_tab_writer_mux;
       let key = Map.length !browser_tab_writer_list in
       browser_tab_writer_list :=
         Map.add_exn !browser_tab_writer_list ~key ~data:w;
-      Mutex.unlock browser_tab_writer_mux;
       upon (Pipe.closed r) (fun () ->
-          Mutex.lock browser_tab_writer_mux;
-          browser_tab_writer_list := Map.remove !browser_tab_writer_list key;
-          Mutex.unlock browser_tab_writer_mux);
+          browser_tab_writer_list := Map.remove !browser_tab_writer_list key);
       Deferred.return (Result.return r))
 
 let implementations =
@@ -112,12 +107,10 @@ let rec send_data_updates_to_all_browser_tabs () =
   match%bind Pipe.read server_response_reader with
   | `Eof -> Deferred.unit
   | `Ok x ->
-      Mutex.lock browser_tab_writer_mux;
       let%bind () =
         Deferred.Map.iter !browser_tab_writer_list ~f:(fun w ->
             Pipe.write_if_open w x)
       in
-      Mutex.unlock browser_tab_writer_mux;
       send_data_updates_to_all_browser_tabs ()
 
 let command =

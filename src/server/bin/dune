@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (libraries core async rpcs common pbft_server)
+ (preprocess (pps ppx_jane))
+)

@@ -1,12 +1,20 @@
 open Core_kernel
 open Async_kernel
+open Async_js
 open Incr_dom
 open Rpcs
 
 module Model = struct
-  type t = { input_text : string; value : int } [@@deriving fields, equal]
+  type t = {
+    input_text : string;
+    value : int;
+    operation_reader : Interface.Operation.t Pipe.Reader.t;
+    operation_writer : Interface.Operation.t Pipe.Writer.t;
+  }
+  [@@deriving fields]
 
-  let cutoff = equal
+  let cutoff t1 t2 =
+    String.equal t1.input_text t2.input_text && Int.equal t1.value t2.value
 end
 
 module State = struct
@@ -18,17 +26,25 @@ module Action = struct
   [@@deriving sexp]
 end
 
-let data_r, data_w = Pipe.create ()
-
-let operation_r, operation_w = Pipe.create ()
-
-let initial_model = Model.{ input_text = ""; value = 0 }
-
-let on_startup ~schedule_action _model =
+let on_startup ~schedule_action (model : Model.t) =
+  let%bind connection =
+    Rpc.Connection.client_exn ~uri:(Uri.of_string "ws://localhost") ()
+  in
+  let%bind data_r, _ =
+    Rpc.Pipe_rpc.dispatch_exn App_to_client_rpcs.data_rpc connection ()
+  in
   don't_wait_for
     (Pipe.iter_without_pushback data_r ~f:(fun data ->
          schedule_action (Action.Apply data)));
+  don't_wait_for
+    (Pipe.iter_without_pushback model.operation_reader ~f:(fun operation ->
+         Rpc.One_way.dispatch_exn App_to_client_rpcs.operation_rpc connection
+           operation));
   Deferred.unit
+
+let initial_model =
+  let operation_reader, operation_writer = Pipe.create () in
+  { Model.input_text = ""; value = 0; operation_reader; operation_writer }
 
 let create (model : Model.t Incr.t) ~old_model:_ ~inject =
   let open Incr.Let_syntax in
@@ -39,15 +55,11 @@ let create (model : Model.t Incr.t) ~old_model:_ ~inject =
       | Action.Apply data -> Model.{ model with value = data }
       | Submit ->
           let text = model.input_text in
-          printf "Text val: %s\n" text;
           Option.iter (int_of_string_opt text) ~f:(fun x ->
-              printf "Submitting\n";
-              Pipe.write_without_pushback operation_w
+              Pipe.write_without_pushback model.operation_writer
                 (Interface.Operation.Add x));
           model
-      | Update_add_input s ->
-          printf "Input updated to %s\n" s;
-          Model.{ model with input_text = s }
+      | Update_add_input s -> Model.{ model with input_text = s }
   and model = model
   and view =
     let open Vdom in

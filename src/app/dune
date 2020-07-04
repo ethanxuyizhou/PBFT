@@ -1,5 +1,5 @@
 (executables 
   (names main)
-  (libraries uri incr_dom core_kernel async_kernel async_js rpcs)
+  (libraries uri bonsai core_kernel async_kernel async_js rpcs incr_dom)
   (preprocess (pps js_of_ocaml-ppx ppx_jane))
 )

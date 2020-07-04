@@ -1,9 +1,5 @@
-open Async_kernel
-open Rpcs
-
-val data_w : Interface.Data.t Pipe.Writer.t
-
-val operation_r : Interface.Operation.t Pipe.Reader.t
+open! Core_kernel
+open! Async_kernel
 
 include Incr_dom.App_intf.S
 

@@ -13,15 +13,15 @@ then
   exit 1
 fi
 
-ports=($(shuf -i 4000-5000 -n $1))
+ports=$(shuf -i 4000-5000 -n $count)
 for port in ${ports[@]}
 do
   host_and_ports+="-host-and-port localhost:$port "
 done
 
-me=1
+me=0
 
-while (( $me < $count ))
+while (( $me < $active ))
 do
   eval "${server_command} ${host_and_ports}-me ${me} &"
   let "me+=1"

@@ -1,5 +1,5 @@
-(executable
- (name server)
- (libraries core async rpcs common)
+(library
+ (name pbft_server)
+ (libraries core async rpcs common pbft_state)
  (preprocess (pps ppx_jane))
 )
