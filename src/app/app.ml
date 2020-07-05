@@ -1,87 +1,61 @@
-open Core_kernel
-open Async_kernel
-open Async_js
-open Incr_dom
+open! Core_kernel
+open! Async_kernel
 open Rpcs
+open Bonsai_web.Future
 
 module Model = struct
-  type t = {
-    input_text : string;
-    value : int;
-    operation_reader : Interface.Operation.t Pipe.Reader.t;
-    operation_writer : Interface.Operation.t Pipe.Writer.t;
-  }
-  [@@deriving fields]
+  type t = { input_text : string; value : Interface.Data.t }
+  [@@deriving sexp, fields, equal]
 
-  let cutoff t1 t2 =
-    String.equal t1.input_text t2.input_text && Int.equal t1.value t2.value
-end
-
-module State = struct
-  type t = unit
+  let default = { input_text = ""; value = 0 }
 end
 
 module Action = struct
-  type t = Apply of Interface.Data.t | Submit | Update_add_input of string
+  type t =
+    | Update_value of Interface.Data.t
+    | Submit
+    | Update_input_text of string
   [@@deriving sexp]
 end
 
-let on_startup ~schedule_action (model : Model.t) =
-  let%bind connection =
-    Rpc.Connection.client_exn ~uri:(Uri.of_string "ws://localhost") ()
+let build data ((model : Model.t), apply_action) =
+  let add_button =
+    Vdom.Node.button
+      [ Vdom.Attr.on_click (fun _ev -> apply_action Action.Submit) ]
+      [ Vdom.Node.text "Add" ]
   in
-  let%bind data_r, _ =
-    Rpc.Pipe_rpc.dispatch_exn App_to_client_rpcs.data_rpc connection ()
+  let text_box =
+    Vdom.Node.input
+      [
+        Vdom.Attr.type_ "text";
+        Vdom.Attr.string_property "value" (Int.to_string data);
+        Vdom.Attr.on_input (fun _ev text ->
+            apply_action (Action.Update_input_text text));
+      ]
+      []
   in
-  don't_wait_for
-    (Pipe.iter_without_pushback data_r ~f:(fun data ->
-         schedule_action (Action.Apply data)));
-  don't_wait_for
-    (Pipe.iter_without_pushback model.operation_reader ~f:(fun operation ->
-         Rpc.One_way.dispatch_exn App_to_client_rpcs.operation_rpc connection
-           operation));
-  Deferred.unit
+  let value = Vdom.Node.text (string_of_int model.value) in
+  Vdom.Node.body [] [ text_box; add_button; value ]
 
-let initial_model =
-  let operation_reader, operation_writer = Pipe.create () in
-  { Model.input_text = ""; value = 0; operation_reader; operation_writer }
-
-let create (model : Model.t Incr.t) ~old_model:_ ~inject =
-  let open Incr.Let_syntax in
-  let%map apply_action =
-    let%map model = model in
-    fun action _state ~schedule_action:_ ->
-      match action with
-      | Action.Apply data -> Model.{ model with value = data }
-      | Submit ->
-          let text = model.input_text in
-          Option.iter (int_of_string_opt text) ~f:(fun x ->
-              Pipe.write_without_pushback model.operation_writer
-                (Interface.Operation.Add x));
-          model
-      | Update_add_input s -> Model.{ model with input_text = s }
-  and model = model
-  and view =
-    let open Vdom in
-    let%bind add_input =
-      let%map input_text = model >>| Model.input_text in
-      Node.input
-        [
-          Attr.type_ "text";
-          Attr.string_property "value" input_text;
-          Attr.on_input (fun _ev text -> inject (Action.Update_add_input text));
-        ]
-        []
-    in
-    let add_button =
-      Node.button
-        [ Attr.on_click (fun _ev -> inject Action.Submit) ]
-        [ Node.text "Add" ]
-    in
-    let%map value =
-      let%map value = model >>| Model.value in
-      Node.text (string_of_int value)
-    in
-    Node.body [] [ add_input; add_button; value ]
+let component ~data ~send_request =
+  let open Bonsai.Let_syntax in
+  let%sub state =
+    Bonsai.state_machine0 [%here]
+      (module Model)
+      (module Action)
+      ~default_model:Model.default
+      ~apply_action:(fun ~inject:_ ~schedule_event:_ model action ->
+        match action with
+        | Action.Update_value data -> { model with value = data }
+        | Submit ->
+            ( match
+                Or_error.try_with (fun () -> Int.of_string model.input_text)
+              with
+            | Ok operation -> send_request (Interface.Operation.Add operation)
+            | Error (_ : Error.t) -> () );
+            model
+        | Update_input_text s -> { model with input_text = s })
   in
-  Component.create ~apply_action model view
+  return
+    (let%map state = state and data = data in
+     build data state)
